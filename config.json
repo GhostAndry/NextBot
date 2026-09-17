@@ -1,0 +1,142 @@
+{
+  "node": {
+    "id": "bot1"
+  },
+
+  "redis": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 6379,
+    "password": ""
+  },
+
+  "leader": {
+    "enabled": false,
+    "lockKey": "nextbot:leader",
+    "lockTtlSeconds": 15,
+    "renewIntervalSeconds": 10,
+    "standbyPollSeconds": 2
+  },
+
+  "discord": {
+    "deployOnStart": true
+  },
+
+  "warzoneStatus": {
+    "enabled": true,
+    "intervalSeconds": 30,
+    "activityType": 3,
+    "metas": [
+      { "label": "BP50 SMG domina close-mid con soppressore + Ranger", "type": "weapon" },
+      { "label": "Kar98k one-shot down fino a 80m con bullet velocity", "type": "weapon" },
+      { "label": "Holger 26 LMG stabilizza le rotazioni in zona finale", "type": "weapon" },
+      { "label": "Holger 26 LMG + Tempus Torrent marksman: loadout gulag-friendly", "type": "loadout" },
+      { "label": "BP50 + Akimbo pistols: rush build aggressivo per piccoli spazi", "type": "loadout" },
+      { "label": "XRK Stalker .50 cal: long range favorito, niente sniper glint", "type": "weapon" },
+      { "label": "TAQ Evolvere LMG: sopprimere e spingere, perfetto per Hold", "type": "weapon" },
+      { "label": "Renetti Akimbo: secondaria da panic, rompe ogni push", "type": "weapon" },
+      { "label": "C4 + molotov è la combo di trappole più forte del momento", "type": "tactical" },
+      { "label": "Gulag: usa il loadout leggero, risparmia il principale per il redeploy", "type": "tactic" },
+      { "label": "Rotta per il Buy Station al terzo cerchio: team W-key nei bunker", "type": "tactic" },
+      { "label": "Meta: si vince con rotazione, non con push frontali — piazza sentry prima del endgame", "type": "tactic" },
+      { "label": "Lockwood 680 con choke: unico shotgun che regge in endgame", "type": "weapon" },
+      { "label": "Stoner 63 nerfato: ora è back-up, non più primary", "type": "weapon" },
+      { "label": "AMR9 rush build: SMG dominante dopo il buff a fuoco e mobilità", "type": "loadout" },
+      { "label": "Pulemyot 762 + JAK Raven kit: anti-vehicle e mid-range", "type": "loadout" }
+    ]
+  },
+
+  "database": {
+    "driver": "sqlite",
+    "sqlite": {
+      "path": "./data/nextbot.db"
+    },
+    "postgres": {
+      "host": "127.0.0.1",
+      "port": 5432,
+      "user": "nextbot",
+      "password": "",
+      "database": "nextbot",
+      "schema": "public"
+    }
+  },
+
+  "features": {
+    "tickets": {
+      "enabled": true,
+      "categoryId": "",
+      "logChannelId": "",
+      "transcriptOnClose": true,
+      "maxPerUser": 3
+    },
+
+    "tempChannels": {
+      "enabled": true,
+      "hubVoiceChannelId": "",
+      "autoDeleteSecondsEmpty": 30,
+      "defaultUserLimit": 0
+    },
+
+    "moderation": {
+      "enabled": true,
+      "logChannelId": "",
+      "muteRoleId": "",
+      "maxWarns": 3,
+      "warnAction": "mute"
+    },
+
+    "levels": {
+      "enabled": true,
+      "xpMin": 15,
+      "xpMax": 25,
+      "cooldownSeconds": 60,
+      "announceLevelUp": true,
+      "announceChannelId": "",
+      "rewards": [
+        { "level": 5,   "roleId": "" },
+        { "level": 10,  "roleId": "" },
+        { "level": 20,  "roleId": "" },
+        { "level": 50,  "roleId": "" },
+        { "level": 100, "roleId": "" }
+      ]
+    },
+
+    "economy": {
+      "enabled": true,
+      "startingBalance": 500,
+      "dailyMin": 100,
+      "dailyMax": 300,
+      "dailyStreakBonus": 50,
+      "workMin": 50,
+      "workMax": 200,
+      "robSuccessRate": 0.4,
+      "robMaxPercent": 0.25
+    },
+
+    "poker": {
+      "enabled": true,
+      "minBuyIn": 100,
+      "maxBuyIn": 10000,
+      "smallBlind": 10,
+      "maxPlayers": 6
+    },
+
+    "blackjack": {
+      "enabled": true,
+      "minBet": 10,
+      "maxBet": 5000
+    },
+
+    "voicemove": {
+      "enabled": true,
+      "autoLeaveMs": 30000
+    },
+
+    "soundboards": {
+      "enabled": true,
+      "maxFileSizeMb": 8,
+      "storageDir": "./data/sounds",
+      "volume": 0.6
+    }
+  }
+}

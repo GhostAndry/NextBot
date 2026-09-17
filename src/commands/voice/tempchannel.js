@@ -1,0 +1,602 @@
+'use strict';
+
+const {
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+  ChannelType,
+  PermissionsBitField,
+  MessageFlags,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+} = require('discord.js');
+const config = require('../../config');
+const repo = require('../../db/repo');
+const settingsResolver = require('../../services/settings-resolver');
+const voiceTracker = require('../../services/voice-state-tracker');
+const voiceStateEvent = require('../../events/voiceStateUpdate');
+const { successEmbed, errorEmbed } = require('../../utils/helpers');
+const logger = require('../../utils/logger');
+
+// Sistema "multi temp voice" stile VoiceMaster/TempVoice: ogni utente che entra
+// nell'hub vocale configurato crea il proprio canale privato e ne diventa il
+// proprietario. Può rinominare, bloccare, limitare, cacciare, trasferire la
+// proprietà o lasciare che altri rivendichino il canale quando esce.
+//
+// Comandi:
+//   /voice create            crea canale testuale temporaneo (legacy, per staff)
+//   /voice rename            cambia nome al proprio canale
+//   /voice lock / unlock     blocca/riapri join al proprio canale
+//   /voice limit             imposta limite utenti (0 = illimitato)
+//   /voice kick              caccia un utente dal proprio canale
+//   /voice transfer          trasferisce la proprietà a un altro membro
+//   /voice claim             prende possesso di un canale orfano
+//   /voice permit            riammette un utente precedentemente bloccato
+//   /voice info              mostra config del canale attuale
+//
+// Comportamento runtime:
+//   - Quando l'owner lascia, il canale resta aperto finché non si svuota.
+//     Se è attivo `autoClaimOnLeave`, il primo utente presente può /voice claim.
+//   - Gli utenti in `blocked` vengono kickati automaticamente se provano a entrare.
+
+const DEFAULT_TEXT_MINUTES = 5;
+const MIN_TEXT_MINUTES = 1;
+const MAX_TEXT_MINUTES = 1440;
+
+const CMD = 'voice';
+
+// CustomId: `<commandName>:<action>` - il dispatcher in interactionCreate usa il
+// prefisso `voice:` per instradare i bottoni. Ogni customId è minuscolo.
+const BTN = {
+  RENAME: `${CMD}:btn:rename`,
+  LOCK: `${CMD}:btn:lock`,
+  UNLOCK: `${CMD}:btn:unlock`,
+  LIMIT: `${CMD}:btn:limit`,
+  KICK: `${CMD}:btn:kick`,
+  TRANSFER: `${CMD}:btn:transfer`,
+  CLAIM: `${CMD}:btn:claim`,
+  REFRESH: `${CMD}:btn:refresh`,
+};
+const MODAL = {
+  RENAME: `${CMD}:modal:rename`,
+  LIMIT: `${CMD}:modal:limit`,
+  KICK: `${CMD}:modal:kick`,
+  TRANSFER: `${CMD}:modal:transfer`,
+};
+
+// --- Definizione comando ---------------------------------------------------
+
+const data = new SlashCommandBuilder()
+  .setName(CMD)
+  .setDescription('Canali vocali temporanei: ogni membro è proprietario del proprio canale')
+  .addSubcommand((sc) => sc.setName('create').setDescription('Crea un canale testuale temporaneo')
+    .addStringOption((o) => o.setName('nome').setDescription('Nome del canale').setRequired(true))
+    .addIntegerOption((o) => o.setName('minuti').setDescription('Auto-elimina dopo N minuti (default 5)').setMinValue(MIN_TEXT_MINUTES).setMaxValue(MAX_TEXT_MINUTES)))
+  .addSubcommand((sc) => sc.setName('rename').setDescription('Rinomina il tuo canale').addStringOption((o) => o.setName('nome').setDescription('Nuovo nome (max 90 caratteri)').setRequired(true).setMaxLength(90)))
+  .addSubcommand((sc) => sc.setName('lock').setDescription('Blocca l\'accesso al tuo canale'))
+  .addSubcommand((sc) => sc.setName('unlock').setDescription('Sblocca l\'accesso al tuo canale'))
+  .addSubcommand((sc) => sc.setName('limit').setDescription('Cambia il limite utenti (0=illimitato)').addIntegerOption((o) => o.setName('numero').setDescription('0-99').setMinValue(0).setMaxValue(99).setRequired(true)))
+  .addSubcommand((sc) => sc.setName('kick').setDescription('Caccia un utente dal tuo canale').addUserOption((o) => o.setName('utente').setDescription('Utente da cacciare').setRequired(true)))
+  .addSubcommand((sc) => sc.setName('permit').setDescription('Riammetti un utente precedentemente bloccato').addUserOption((o) => o.setName('utente').setDescription('Utente da sbloccare').setRequired(true)))
+  .addSubcommand((sc) => sc.setName('transfer').setDescription('Trasferisci la proprietà a un altro membro').addUserOption((o) => o.setName('utente').setDescription('Nuovo proprietario (deve essere nel canale)').setRequired(true)))
+  .addSubcommand((sc) => sc.setName('claim').setDescription('Rivendica un canale temporaneo orfano (owner assente)'))
+  .addSubcommand((sc) => sc.setName('info').setDescription('Mostra la configurazione del tuo canale'));
+
+// --- Dispatcher -----------------------------------------------------------
+
+async function execute(interaction) {
+  if (!config.features.tempChannels.enabled) return disabled(interaction);
+
+  const sub = interaction.options.getSubcommand();
+  const handler = SUBCOMMAND_HANDLERS[sub];
+  if (!handler) return error(interaction, 'Sottocomando sconosciuto.');
+  return handler(interaction);
+}
+
+async function handleComponent(interaction) {
+  // Bottoni del pannello di controllo - agiscono sul canale in cui il messaggio
+  // è stato inviato (sono deprecati una volta che l'owner cambia canale, ma
+  // vengono invalidati dai check di ownership).
+  if (!interaction.isButton()) return false;
+
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+
+  const { channel, temp } = result;
+  switch (interaction.customId) {
+    case BTN.RENAME:
+      return showRenameModal(interaction);
+    case BTN.LOCK:
+      return setLocked(interaction, channel, temp, true);
+    case BTN.UNLOCK:
+      return setLocked(interaction, channel, temp, false);
+    case BTN.LIMIT:
+      return showLimitModal(interaction);
+    case BTN.KICK:
+      return showKickModal(interaction);
+    case BTN.TRANSFER:
+      return showTransferModal(interaction);
+    case BTN.CLAIM:
+      return claimChannel(interaction, channel, temp);
+    case BTN.REFRESH:
+      return interaction.update({ embeds: [buildPanel(channel, temp)], components: interaction.message.components });
+    default:
+      return false;
+  }
+}
+
+async function handleModal(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+  const { channel: voiceChan, temp } = result;
+
+  if (interaction.customId === MODAL.RENAME) {
+    const name = interaction.fields.getTextInputValue('nome')?.trim();
+    if (!name || name.length < 1) return interaction.reply({ embeds: [errorEmbed('Nome non valido', 'Inserisci un nome.')], flags: MessageFlags.Ephemeral });
+    try {
+      await voiceChan.setName(name.slice(0, 90), 'voice rename');
+    } catch (err) {
+      return interaction.reply({ embeds: [errorEmbed('Errore', err.message)], flags: MessageFlags.Ephemeral });
+    }
+    await syncSnapshot(interaction, voiceChan);
+    return interaction.reply({ embeds: [successEmbed('Rinominato', `Canale rinominato in **${name}**.`)], flags: MessageFlags.Ephemeral });
+  }
+
+  if (interaction.customId === MODAL.LIMIT) {
+    const raw = interaction.fields.getTextInputValue('limite');
+    const n = parseInt(raw, 10);
+    if (Number.isNaN(n) || n < 0 || n > 99) {
+      return interaction.reply({ embeds: [errorEmbed('Valore non valido', 'Inserisci un numero tra 0 e 99.')], flags: MessageFlags.Ephemeral });
+    }
+    try {
+      await voiceChan.setUserLimit(n, 'voice limit');
+    } catch (err) {
+      return interaction.reply({ embeds: [errorEmbed('Errore', err.message)], flags: MessageFlags.Ephemeral });
+    }
+    await syncSnapshot(interaction, voiceChan);
+    return interaction.reply({ embeds: [successEmbed('Limite aggiornato', n === 0 ? 'Illimitato.' : `Massimo **${n}** utenti.`)], flags: MessageFlags.Ephemeral });
+  }
+
+  if (interaction.customId === MODAL.KICK) {
+    const userId = interaction.fields.getTextInputValue('utente')?.trim();
+    if (!/^\d{17,20}$/.test(userId)) {
+      return interaction.reply({ embeds: [errorEmbed('ID non valido', 'Inserisci un ID utente valido.')], flags: MessageFlags.Ephemeral });
+    }
+    const guild = interaction.guild;
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member?.voice?.channel || member.voice.channel.id !== voiceChan.id) {
+      return interaction.reply({ embeds: [errorEmbed('Non in canale', 'Questo utente non è nel tuo canale.')], flags: MessageFlags.Ephemeral });
+    }
+    await repo.addBlockedUser(voiceChan.id, userId);
+    try {
+      await member.voice.setChannel(null, 'voice kick');
+    } catch (err) {
+      return interaction.reply({ embeds: [errorEmbed('Errore', err.message)], flags: MessageFlags.Ephemeral });
+    }
+    await syncSnapshot(interaction, voiceChan);
+    return interaction.reply({ embeds: [successEmbed('Cacciato', `<@${userId}> è stato cacciato e non potrà rientrare finché non lo sblocchi.`)], flags: MessageFlags.Ephemeral });
+  }
+
+  if (interaction.customId === MODAL.TRANSFER) {
+    const userId = interaction.fields.getTextInputValue('utente')?.trim();
+    if (!/^\d{17,20}$/.test(userId)) {
+      return interaction.reply({ embeds: [errorEmbed('ID non valido', 'Inserisci un ID utente valido.')], flags: MessageFlags.Ephemeral });
+    }
+    if (userId === temp.owner_id) {
+      return interaction.reply({ embeds: [errorEmbed('Sei già proprietario', 'Quel membro è già il proprietario.')], flags: MessageFlags.Ephemeral });
+    }
+    const member = await interaction.guild.members.fetch(userId).catch(() => null);
+    if (!member?.voice?.channel || member.voice.channel.id !== voiceChan.id) {
+      return interaction.reply({ embeds: [errorEmbed('Non in canale', 'Il nuovo proprietario deve essere nel canale.')], flags: MessageFlags.Ephemeral });
+    }
+    await repo.transferTempOwnership(voiceChan.id, userId);
+    voiceTracker.set(interaction.guildId, voiceChan.id, userId);
+    await voiceStateEvent.renameForNewOwner(voiceChan, member);
+    // Lo snapshot seguirà il nuovo owner (la chiave è guild+ownerId+hubId).
+    const fresh = await repo.getTempChannel(voiceChan.id);
+    if (fresh) await voiceStateEvent.liveSyncVoiceRoom(voiceChan, { ...fresh, owner_id: userId, guild_id: interaction.guildId });
+    return interaction.reply({ embeds: [successEmbed('Trasferito', `<@${userId}> è ora il proprietario del canale. Il pannello di controllo è stato trasferito.`)], flags: MessageFlags.Ephemeral });
+  }
+
+  return false;
+}
+
+const SUBCOMMAND_HANDLERS = {
+  create: cmdCreateText,
+  rename: cmdRename,
+  lock: cmdLock,
+  unlock: cmdUnlock,
+  limit: cmdLimit,
+  kick: cmdKick,
+  permit: cmdPermit,
+  transfer: cmdTransfer,
+  claim: cmdClaim,
+  info: cmdInfo,
+};
+
+// --- create (canale testuale temporaneo, legacy) --------------------------
+
+async function cmdCreateText(interaction) {
+  if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+    return error(interaction, 'Solo lo staff può creare canali testuali temporanei.');
+  }
+  const name = interaction.options.getString('nome');
+  const minutes = interaction.options.getInteger('minuti') || DEFAULT_TEXT_MINUTES;
+
+  let channel;
+  try {
+    channel = await interaction.guild.channels.create({
+      name,
+      type: ChannelType.GuildText,
+      parent: interaction.channel.parentId,
+      permissionOverwrites: buildPermissionOverwrites(interaction),
+    });
+  } catch (err) {
+    return error(interaction, err.message);
+  }
+
+  await repo.openTempChannel(channel.id, interaction.guildId, interaction.user.id, 'text');
+  await interaction.reply({ embeds: [successEmbed('Creato', `${channel} verrà eliminato automaticamente tra ${minutes} minuti.`)], flags: MessageFlags.Ephemeral });
+  scheduleTextDelete(channel, minutes);
+}
+
+function scheduleTextDelete(channel, minutes) {
+  setTimeout(async () => {
+    try {
+      const fresh = channel.guild.channels.cache.get(channel.id);
+      if (!fresh) return;
+      await repo.removeTempChannel(channel.id);
+      await fresh.delete('canale temporaneo scaduto');
+    } catch (_) {}
+  }, minutes * 60 * 1000);
+}
+
+// --- rename / limit (via argomenti) ---------------------------------------
+
+// Helper: rilegge il canale temp dal DB + sincronizza lo snapshot VoiceRoom,
+// così se il canale viene eliminato all'improvviso le impostazioni sono già
+// persistenti. Centralizzato per ridurre boilerplate.
+async function syncSnapshot(interaction, channel) {
+  try {
+    const temp = await repo.getTempChannel(channel.id);
+    if (temp) await voiceStateEvent.liveSyncVoiceRoom(channel, temp);
+  } catch (err) {
+    logger.warn({ err: err.message, channel: channel.id }, 'syncSnapshot fallito');
+  }
+}
+
+async function cmdRename(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+
+  const name = interaction.options.getString('nome');
+  try {
+    await result.channel.setName(name.slice(0, 90), 'voice rename');
+  } catch (err) {
+    return error(interaction, err.message);
+  }
+  await syncSnapshot(interaction, result.channel);
+  await interaction.reply({ embeds: [successEmbed('Rinominato', `Canale rinominato in **${name}**.`)], flags: MessageFlags.Ephemeral });
+}
+
+async function cmdLimit(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+
+  const n = interaction.options.getInteger('numero');
+  try {
+    await result.channel.setUserLimit(n, 'voice limit');
+  } catch (err) {
+    return error(interaction, err.message);
+  }
+  await syncSnapshot(interaction, result.channel);
+  await interaction.reply({ embeds: [successEmbed('Limite aggiornato', n === 0 ? 'Illimitato.' : `Massimo **${n}** utenti.`)], flags: MessageFlags.Ephemeral });
+}
+
+// --- lock / unlock --------------------------------------------------------
+
+async function cmdLock(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+  return setLocked(interaction, result.channel, result.temp, true);
+}
+
+async function cmdUnlock(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+  return setLocked(interaction, result.channel, result.temp, false);
+}
+
+async function setLocked(interaction, channel, temp, locked) {
+  await repo.setTempLocked(channel.id, locked);
+  if (locked) {
+    await channel.permissionOverwrites.edit(interaction.guild.id, { Connect: false }, { reason: 'voice lock' });
+  } else {
+    await channel.permissionOverwrites.edit(interaction.guild.id, { Connect: null }, { reason: 'voice unlock' });
+  }
+  if (locked && channel.members.size > 0) {
+    // Caccia chi non è autorizzato (owner + bot restano).
+    const allow = new Set([temp.owner_id, interaction.client.user.id]);
+    for (const [, member] of channel.members) {
+      if (allow.has(member.id)) continue;
+      try { await member.voice.setChannel(null, 'voice locked'); } catch (_) {}
+    }
+  }
+  // Rileggo temp aggiornato dal DB (locked cambiato) per sincronizzare lo snapshot.
+  const fresh = await repo.getTempChannel(channel.id);
+  if (fresh) await voiceStateEvent.liveSyncVoiceRoom(channel, fresh);
+  return interaction.reply({ embeds: [successEmbed(locked ? 'Bloccato' : 'Sbloccato', `Il canale è ora **${locked ? 'bloccato' : 'aperto'}** ai nuovi ingressi.`)], flags: MessageFlags.Ephemeral });
+}
+
+// --- kick / permit --------------------------------------------------------
+
+async function cmdKick(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+
+  const target = interaction.options.getUser('utente');
+  const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+  if (!member?.voice?.channel || member.voice.channel.id !== result.channel.id) {
+    return error(interaction, 'Questo utente non è nel tuo canale.');
+  }
+  if (target.id === result.temp.owner_id) {
+    return error(interaction, 'Non puoi cacciare te stesso.');
+  }
+  await repo.addBlockedUser(result.channel.id, target.id);
+  try {
+    await member.voice.setChannel(null, 'voice kick');
+  } catch (err) {
+    return error(interaction, err.message);
+  }
+  await syncSnapshot(interaction, result.channel);
+  return interaction.reply({ embeds: [successEmbed('Cacciato', `<@${target.id}> è stato cacciato. Usa \`/voice permit\` per riammesso.`)], flags: MessageFlags.Ephemeral });
+}
+
+async function cmdPermit(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+
+  const target = interaction.options.getUser('utente');
+  await repo.removeBlockedUser(result.channel.id, target.id);
+  await syncSnapshot(interaction, result.channel);
+  return interaction.reply({ embeds: [successEmbed('Riammesso', `<@${target.id}> può rientrare.`)], flags: MessageFlags.Ephemeral });
+}
+
+// --- transfer -------------------------------------------------------------
+
+async function cmdTransfer(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+
+  const target = interaction.options.getUser('utente');
+  if (target.id === result.temp.owner_id) {
+    return error(interaction, 'Sei già il proprietario.');
+  }
+  const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+  if (!member?.voice?.channel || member.voice.channel.id !== result.channel.id) {
+    return error(interaction, 'Il nuovo proprietario deve essere nel canale.');
+  }
+  await repo.transferTempOwnership(result.channel.id, target.id);
+  voiceTracker.set(interaction.guildId, result.channel.id, target.id);
+  await voiceStateEvent.renameForNewOwner(result.channel, member);
+  // Lo snapshot passa al nuovo owner.
+  const fresh = await repo.getTempChannel(result.channel.id);
+  if (fresh) await voiceStateEvent.liveSyncVoiceRoom(result.channel, { ...fresh, owner_id: target.id, guild_id: interaction.guildId });
+  return interaction.reply({ embeds: [successEmbed('Trasferito', `<@${target.id}> è ora il proprietario del canale.`)], flags: MessageFlags.Ephemeral });
+}
+
+// --- claim ----------------------------------------------------------------
+
+async function cmdClaim(interaction) {
+  const channel = interaction.member.voice?.channel;
+  if (!channel) return error(interaction, 'Entra prima in un canale vocale.');
+
+  const temp = await repo.getTempChannel(channel.id);
+  if (!temp) return error(interaction, 'Questo canale non è temporaneo.');
+  if (temp.owner_id === interaction.user.id) {
+    return error(interaction, 'Sei già il proprietario.');
+  }
+
+  const ownerStillHere = channel.members.has(temp.owner_id);
+  if (ownerStillHere) {
+    return error(interaction, 'Il proprietario è ancora nel canale.');
+  }
+
+  await repo.transferTempOwnership(channel.id, interaction.user.id);
+  voiceTracker.set(interaction.guildId, channel.id, interaction.user.id);
+  await voiceStateEvent.renameForNewOwner(channel, interaction.member);
+  // Lo snapshot passa al nuovo claimer.
+  const fresh = await repo.getTempChannel(channel.id);
+  if (fresh) await voiceStateEvent.liveSyncVoiceRoom(channel, { ...fresh, owner_id: interaction.user.id, guild_id: interaction.guildId });
+  await interaction.reply({ embeds: [successEmbed('Rivendicato', `Ora sei il proprietario di **${channel.name}**.`)], flags: MessageFlags.Ephemeral });
+}
+
+async function claimChannel(interaction, channel, temp) {
+  // Reclamo da bottone (l'owner ha lasciato o ha abbandonato).
+  const ownerStillHere = channel.members.has(temp.owner_id);
+  if (ownerStillHere) {
+    return interaction.update({ embeds: [interaction.message.embeds[0]], components: interaction.message.components });
+  }
+  await repo.transferTempOwnership(channel.id, interaction.user.id);
+  voiceTracker.set(interaction.guildId, channel.id, interaction.user.id);
+  await voiceStateEvent.renameForNewOwner(channel, interaction.member);
+  const fresh = await repo.getTempChannel(channel.id);
+  if (fresh) await voiceStateEvent.liveSyncVoiceRoom(channel, { ...fresh, owner_id: interaction.user.id, guild_id: interaction.guildId });
+  return interaction.reply({ embeds: [successEmbed('Rivendicato', `Ora sei il proprietario di **${channel.name}**.`)], flags: MessageFlags.Ephemeral });
+}
+
+// --- info -----------------------------------------------------------------
+
+async function cmdInfo(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+  return interaction.reply({ embeds: [buildPanel(result.channel, result.temp)], flags: MessageFlags.Ephemeral });
+}
+
+// --- Pannello di controllo (bottoni) -------------------------------------
+
+function buildPanel(channel, temp) {
+  const ownerMention = `<@${temp.owner_id}>`;
+  const limit = channel.userLimit === 0 ? '∞' : String(channel.userLimit);
+  const blocked = Array.isArray(temp.blocked) ? temp.blocked.length : 0;
+  const desc = [
+    `**Canale:** ${channel}`,
+    `**Proprietario:** ${ownerMention}`,
+    `**Stato:** ${temp.locked ? '🔒 bloccato' : '🔓 aperto'}`,
+    `**Limite utenti:** ${limit}`,
+    `**Membri attuali:** ${channel.members.size}`,
+    `**Bloccati:** ${blocked}`,
+  ].join('\n');
+  return new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('🎛️ Pannello controllo canale')
+    .setDescription(desc)
+    .setFooter({ text: 'I bottoni qui sotto agiscono sul canale in cui ti trovi.' })
+    .setTimestamp();
+}
+
+function buildControlRows() {
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(BTN.RENAME).setLabel('Rinomina').setStyle(ButtonStyle.Secondary).setEmoji('✏️'),
+    new ButtonBuilder().setCustomId(BTN.LIMIT).setLabel('Limite').setStyle(ButtonStyle.Secondary).setEmoji('👥'),
+    new ButtonBuilder().setCustomId(BTN.LOCK).setLabel('Lock').setStyle(ButtonStyle.Primary).setEmoji('🔒'),
+    new ButtonBuilder().setCustomId(BTN.UNLOCK).setLabel('Unlock').setStyle(ButtonStyle.Primary).setEmoji('🔓'),
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(BTN.KICK).setLabel('Kick').setStyle(ButtonStyle.Danger).setEmoji('👢'),
+    new ButtonBuilder().setCustomId(BTN.TRANSFER).setLabel('Proprietario').setStyle(ButtonStyle.Success).setEmoji('👑'),
+    new ButtonBuilder().setCustomId(BTN.CLAIM).setLabel('Claim').setStyle(ButtonStyle.Success).setEmoji('🙋'),
+    new ButtonBuilder().setCustomId(BTN.REFRESH).setLabel('Aggiorna').setStyle(ButtonStyle.Secondary).setEmoji('🔄'),
+  );
+  return [row1, row2];
+}
+
+function buildRenameModal() {
+  return {
+    title: 'Rinomina canale',
+    customId: MODAL.RENAME,
+    components: [[
+      { customId: 'nome', label: 'Nuovo nome (max 90)', style: 1, minLength: 1, maxLength: 90, required: true },
+    ]],
+  };
+}
+
+function buildLimitModal() {
+  return {
+    title: 'Limite utenti (0 = illimitato)',
+    customId: MODAL.LIMIT,
+    components: [[
+      { customId: 'limite', label: 'Numero tra 0 e 99', style: 1, minLength: 1, maxLength: 2, required: true },
+    ]],
+  };
+}
+
+function buildKickModal() {
+  return {
+    title: 'Caccia un utente',
+    customId: MODAL.KICK,
+    components: [[
+      { customId: 'utente', label: 'ID utente da cacciare', style: 1, minLength: 17, maxLength: 20, required: true },
+    ]],
+  };
+}
+
+function buildTransferModal() {
+  return {
+    title: 'Trasferisci proprietà',
+    customId: MODAL.TRANSFER,
+    components: [[
+      { customId: 'utente', label: 'ID del nuovo proprietario', style: 1, minLength: 17, maxLength: 20, required: true },
+    ]],
+  };
+}
+
+function showRenameModal(interaction) {
+  return interaction.showModal(buildModalFromSpec(buildRenameModal()));
+}
+function showLimitModal(interaction) {
+  return interaction.showModal(buildModalFromSpec(buildLimitModal()));
+}
+function showKickModal(interaction) {
+  return interaction.showModal(buildModalFromSpec(buildKickModal()));
+}
+function showTransferModal(interaction) {
+  return interaction.showModal(buildModalFromSpec(buildTransferModal()));
+}
+
+function buildModalFromSpec(spec) {
+  const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
+  const modal = new ModalBuilder().setCustomId(spec.customId).setTitle(spec.title);
+  const rows = spec.components.map((inputs) => {
+    const row = new ActionRowBuilder();
+    for (const i of inputs) {
+      const input = new TextInputBuilder()
+        .setCustomId(i.customId)
+        .setLabel(i.label)
+        .setStyle(i.style === 1 ? TextInputStyle.Short : TextInputStyle.Paragraph)
+        .setRequired(Boolean(i.required))
+        .setMinLength(i.minLength || 0)
+        .setMaxLength(i.maxLength || 4000);
+      row.addComponents(input);
+    }
+    return row;
+  });
+  modal.addComponents(...rows);
+  return modal;
+}
+
+// --- Risoluzione ownership ------------------------------------------------
+
+// Risolve il canale vocale temporaneo di cui l'utente è owner. Usato sia da
+// /voice <sub> che dai bottoni. Risposta uniforme:
+//   { ok: true, channel, temp }
+//   { ok: false, reply: Promise<void> } -- il caller esegue `return result.reply`
+async function resolveOwnedVoiceChannel(interaction) {
+  const voiceChannel = interaction.member.voice?.channel;
+  if (!voiceChannel) return { ok: false, reply: error(interaction, 'Entra prima in un canale vocale.') };
+
+  const temp = await repo.getTempChannel(voiceChannel.id);
+  if (!temp || temp.kind !== 'voice') {
+    return { ok: false, reply: error(interaction, 'Questo canale non è un temp voice.') };
+  }
+  if (temp.owner_id !== interaction.user.id) {
+    return { ok: false, reply: error(interaction, 'Solo il proprietario può usare questo comando.') };
+  }
+  return { ok: true, channel: voiceChannel, temp };
+}
+
+// --- Invio pannello di benvenuto nel canale --------------------------------
+
+async function sendControlPanel(channel) {
+  try {
+    const rows = buildControlRows();
+    const temp = await repo.getTempChannel(channel.id);
+    await channel.send({ embeds: [buildPanel(channel, temp)], components: rows });
+  } catch (err) {
+    logger.warn({ err: err.message, channel: channel.id }, 'invio pannello controllo fallito');
+  }
+}
+
+// Esportato perché lo usa l'evento voiceStateUpdate per inviare il pannello
+// appena viene creato il canale.
+
+// --- Helper ---------------------------------------------------------------
+
+function buildPermissionOverwrites(interaction) {
+  return [
+    { id: interaction.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+    { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
+    { id: interaction.client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels] },
+  ];
+}
+
+function disabled(interaction) {
+  return interaction.reply({ embeds: [errorEmbed('Disabilitato', 'I canali temporanei sono disabilitati.')], flags: MessageFlags.Ephemeral });
+}
+
+function error(interaction, msg) {
+  return interaction.reply({ embeds: [errorEmbed('Errore', msg)], flags: MessageFlags.Ephemeral });
+}
+
+module.exports = { data, execute, handleComponent, handleModal, BTN, MODAL, sendControlPanel };

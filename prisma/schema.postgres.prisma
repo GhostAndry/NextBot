@@ -1,0 +1,196 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model GuildConfig {
+  guildId                String  @id
+  ticketCategoryId       String?
+  ticketLogChannelId     String?
+  modLogChannelId        String?
+  muteRoleId             String?
+  levelAnnounceChannelId String?
+  tempVoiceHubId         String?
+  autoRoleId             String?
+  welcomeChannelId       String?
+  welcomeMessage         String?
+  prefix                 String  @default("!")
+  settings               String?
+  createdAt              Int?
+
+  @@map("guild_config")
+}
+
+model VoiceHub {
+  id          Int     @id @default(autoincrement())
+  guildId     String
+  channelId   String  @unique
+  name        String  @default("Hub")
+  parentId    String?
+  position    Int     @default(0)
+  isDefault   Int     @default(0)
+  createdAt   Int?
+
+  @@index([guildId])
+  @@map("voice_hubs")
+}
+
+model User {
+  userId        String
+  guildId       String
+  xp            Int     @default(0)
+  level         Int     @default(0)
+  totalMessages Int    @default(0)
+  lastXpAt      Int    @default(0)
+  wallet        Int     @default(0)
+  bank          Int     @default(0)
+  lastDaily     Int    @default(0)
+  dailyStreak   Int    @default(0)
+
+  @@id([userId, guildId])
+  @@map("users")
+}
+
+model Warn {
+  id          Int     @id @default(autoincrement())
+  guildId     String
+  userId      String
+  moderatorId String
+  reason      String?
+  createdAt   Int?
+
+  @@index([guildId, userId])
+  @@map("warns")
+}
+
+model ModLog {
+  id          Int     @id @default(autoincrement())
+  guildId     String
+  action      String
+  targetId    String
+  moderatorId String
+  reason      String?
+  durationMs  Int?
+  createdAt   Int?
+
+  @@map("mod_logs")
+}
+
+model Ticket {
+  id         Int     @id @default(autoincrement())
+  guildId    String
+  channelId  String  @unique
+  userId     String
+  claimedBy  String?
+  closed     Int     @default(0)
+  transcript String?
+  createdAt  Int?
+  closedAt   Int?
+
+  @@index([guildId, userId, closed])
+  @@map("tickets")
+}
+
+model TempChannel {
+  channelId     String  @id
+  guildId       String
+  ownerId       String
+  kind          String
+  hubChannelId  String?
+  locked        Int     @default(0)
+  blocked       String  @default("[]")
+  createdAt     Int?
+
+  @@index([guildId, ownerId])
+  @@index([guildId, hubChannelId])
+  @@map("temp_channels")
+}
+
+model Soundboard {
+  id        Int     @id @default(autoincrement())
+  guildId   String
+  userId    String
+  name      String
+  nameLower String  @default("")
+  filePath  String
+  fileSize  Int?
+  plays     Int     @default(0)
+  createdAt Int?
+
+  @@unique([guildId, nameLower])
+  @@map("soundboards")
+}
+
+model GameSession {
+  id        String @id
+  guildId   String
+  channelId String
+  userId    String
+  game      String
+  state     String
+  createdAt Int?
+  updatedAt Int?
+
+  @@map("game_sessions")
+}
+
+model BlackjackSession {
+  userId     String
+  guildId    String
+  deck       String
+  playerHand String
+  dealerHand String
+  bet        Int
+  status     String
+  updatedAt  Int?
+
+  @@id([userId, guildId])
+  @@map("blackjack_sessions")
+}
+
+model PokerTable {
+  id         String  @id
+  guildId    String
+  channelId  String
+  hostId     String
+  state      String
+  pot        Int     @default(0)
+  smallBlind Int     @default(10)
+  createdAt  Int?
+  updatedAt  Int?
+
+  @@map("poker_tables")
+}
+
+model PokerPlayer {
+  tableId  String
+  userId   String
+  chips    Int     @default(0)
+  bet      Int     @default(0)
+  folded   Int     @default(0)
+  allIn    Int     @default(0)
+  hand     String?
+  position Int?
+
+  @@id([tableId, userId])
+  @@map("poker_players")
+}
+
+model VoiceRoom {
+  id           Int     @id @default(autoincrement())
+  guildId      String
+  ownerId      String
+  hubChannelId String
+  locked       Int     @default(0)
+  blocked      String  @default("[]")
+  settings     String  @default("{}")
+  lastActiveAt Int?
+  createdAt    Int?
+
+  @@unique([guildId, ownerId, hubChannelId])
+  @@index([guildId, hubChannelId])
+  @@map("voice_rooms")
+}

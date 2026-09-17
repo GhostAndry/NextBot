@@ -1,0 +1,56 @@
+{
+  "name": "nextbot",
+  "version": "1.0.0",
+  "description": "NextBot - Scalable Discord bot with Redis leader election, tickets, temp channels, moderation, economy, poker, blackjack, soundboards",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:bot1": "NODE_ID=bot1 node src/index.js",
+    "start:bot2": "NODE_ID=bot2 node src/index.js",
+    "deploy": "node src/deploy-commands.js",
+    "deploy:dry-run": "node src/deploy-commands.js --dry-run",
+    "deploy:wipe": "node src/deploy-commands.js --wipe",
+    "deploy:clean": "node src/deploy-commands.js --only-clean",
+    "deploy:remove": "node src/deploy-commands.js --remove",
+    "deploy:unregister": "node src/deploy-commands.js --unregister-all",
+    "deploy:unregister-global": "node src/deploy-commands.js --unregister-all --include-global",
+    "deploy:list": "node src/deploy-commands.js --list",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push",
+    "prisma:generate:postgres": "prisma generate --schema prisma/schema.postgres.prisma",
+    "prisma:push:postgres": "prisma db push --schema prisma/schema.postgres.prisma",
+    "db:setup": "node scripts/prisma-setup.js",
+    "prisma:studio": "prisma studio",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "@prisma/adapter-better-sqlite3": "^7.10.0",
+    "@prisma/adapter-pg": "7.10",
+    "@prisma/client": "7.10",
+    "better-sqlite3": "^13.0.3",
+    "discord.js": "^14.17.3",
+    "dotenv": "^17.4.2",
+    "ffmpeg-static": "^5.2.0",
+    "ioredis": "^6.0.0",
+    "libsodium-wrappers": "^0.8.4",
+    "pg": "^8.23.0",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.0.0",
+    "prisma": "7.10"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "overrides": {
+    "deepmerge-ts": ">=8.0.2",
+    "mysql2": ">=3.24.4"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "@types/pg": "^8.23.1"
+  }
+}
