@@ -43,6 +43,12 @@ function main() {
      cd ${REPO_DIR}
      echo '== git pull =='
      git pull --rebase --autostash
+     echo '== npm ci (package.json changed?) =='
+     if ! git diff HEAD@{1} HEAD -- package.json package-lock.json | grep -q .; then
+       echo 'nessuna modifica a package.json/lock, skip'
+     else
+       docker exec ${CONTAINER} sh -c 'npm ci --omit=dev'
+     fi
      echo '== prisma db push =='
      docker exec ${CONTAINER} sh -c 'npx prisma db push'
      echo '== prisma generate =='
