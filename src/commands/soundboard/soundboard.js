@@ -11,6 +11,8 @@ const player = require('../../services/soundboard-player');
 
 const ALLOWED_EXTS = ['.mp3', '.ogg', '.wav', '.opus', '.m4a'];
 const AUDIO_MIME = /^audio\//;
+const PLAY_COOLDOWN_MS = 60_000;
+const playCooldowns = new Map();
 
 ensureStorageDir();
 
@@ -99,9 +101,19 @@ async function cmdPlay(interaction) {
   if (!sb) return error(interaction, `Nessun suono "${name}".`);
   if (!fs.existsSync(sb.file_path)) return error(interaction, 'File audio mancante su disco.');
 
+  const key = `${interaction.guildId}:${interaction.user.id}`;
+  const last = playCooldowns.get(key) || 0;
+  const remaining = PLAY_COOLDOWN_MS - (Date.now() - last);
+  if (remaining > 0) {
+    const secondsLeft = Math.ceil(remaining / 1000);
+    return error(interaction, `Aspetta **${secondsLeft}s** prima di lanciare un altro suono.`);
+  }
+  playCooldowns.set(key, Date.now());
+
   try {
     await player.play(interaction.guild, voice.channel, sb.file_path, config.features.soundboards.volume);
   } catch (err) {
+    playCooldowns.delete(key);
     return error(interaction, err.message);
   }
 
