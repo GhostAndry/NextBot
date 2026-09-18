@@ -101,11 +101,10 @@ Lista completa dei comandi slash. Per l'elenco aggiornato a runtime usa `/help t
 | `claim` | Rivendica un canale orfano |
 | `info` | Mostra la configurazione del tuo canale |
 
-**`/voicemove` — sposta tutti i membri**
-| Subcommand | Descrizione |
+**`/voicemove` — sposta tutti i membri (singolo comando, no subcommand)**
+| Comando | Descrizione |
 | --- | --- |
-| `start` | Entra nel tuo canale, trascina il bot nel canale di destinazione |
-| `cancel` | Annulla la sessione attiva |
+| `/voicemove` | Il bot entra nel tuo canale vocale. Trascinalo nel canale di destinazione: tutti i membri attuali nel tuo canale verranno spostati lì. Esce automaticamente dopo 30s di inattività. |
 
 **Context menu `vkick`** — tasto destro su un membro → Apps → VKick. Caccia il membro dal tuo canale.
 
