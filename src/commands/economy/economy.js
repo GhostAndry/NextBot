@@ -81,10 +81,21 @@ async function cmdDaily(interaction) {
 async function cmdWork(interaction) {
   const cfg = config.features.economy;
   const user = await repo.getUser(interaction.user.id, interaction.guildId);
+  const now = await repo.now();
+
+  const cooldown = cfg.workCooldownSeconds ?? 3600;
+  if (cooldown > 0 && user.last_work && (now - user.last_work) < cooldown) {
+    const minutesLeft = Math.ceil((cooldown - (now - user.last_work)) / 60);
+    return error(interaction, `Sei stanco. Torna tra ${minutesLeft} minuti.`);
+  }
+
   const amount = cfg.workMin + Math.floor(Math.random() * (cfg.workMax - cfg.workMin));
   const flavor = WORK_LINES[Math.floor(Math.random() * WORK_LINES.length)];
 
-  await repo.updateUser(interaction.user.id, interaction.guildId, { wallet: user.wallet + amount });
+  await repo.updateUser(interaction.user.id, interaction.guildId, {
+    wallet: user.wallet + amount,
+    last_work: now,
+  });
   await interaction.reply({ embeds: [successEmbed('Lavoro', `${flavor} Hai guadagnato **${amount}** monete.`)] });
 }
 

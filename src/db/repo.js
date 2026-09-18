@@ -665,7 +665,7 @@ async function upsertPokerPlayer(p) {
 
 async function deletePokerPlayer(tableId, userId) {
   return prisma.pokerPlayer.deleteMany({
-    where: { tableId_userId: { tableId, userId } },
+    where: { tableId, userId },
   });
 }
 
