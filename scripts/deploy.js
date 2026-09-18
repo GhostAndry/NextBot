@@ -48,7 +48,7 @@ function main() {
        echo 'nessuna modifica a package.json, skip'
      else
        # /app/node_modules è un Docker volume separato, quindi installiamo
-       # dentro al container. Usiamo `npm install` (non `npm ci`) perché il
+       # dentro al container. Usiamo 'npm install' (non 'npm ci') perché il
        # package-lock.json non è bindato e può non essere sincronizzato.
        docker exec ${CONTAINER} sh -c 'npm install --omit=dev --no-audit --no-fund'
      fi
