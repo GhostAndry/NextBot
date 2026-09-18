@@ -13,7 +13,7 @@ module.exports = {
   async execute(interaction) {
     if (!interaction.guildId) return;
 
-    if (interaction.isChatInputCommand()) {
+    if (interaction.isChatInputCommand() || interaction.isUserContextMenuCommand() || interaction.isMessageContextMenuCommand()) {
       return dispatchCommand(interaction);
     }
 

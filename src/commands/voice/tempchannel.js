@@ -2,6 +2,8 @@
 
 const {
   SlashCommandBuilder,
+  ContextMenuCommandBuilder,
+  ApplicationCommandType,
   PermissionFlagsBits,
   ChannelType,
   PermissionsBitField,
@@ -9,6 +11,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
   EmbedBuilder,
 } = require('discord.js');
 const config = require('../../config');
@@ -58,11 +61,16 @@ const BTN = {
   CLAIM: `${CMD}:btn:claim`,
   REFRESH: `${CMD}:btn:refresh`,
 };
+
+// Select menus del pannello. Seleziono direttamente il membro del canale
+// senza costringere l'utente a scrivere l'ID a mano.
+const SEL = {
+  KICK: `${CMD}:sel:kick`,
+  TRANSFER: `${CMD}:sel:transfer`,
+};
 const MODAL = {
   RENAME: `${CMD}:modal:rename`,
   LIMIT: `${CMD}:modal:limit`,
-  KICK: `${CMD}:modal:kick`,
-  TRANSFER: `${CMD}:modal:transfer`,
 };
 
 // --- Definizione comando ---------------------------------------------------
@@ -77,9 +85,9 @@ const data = new SlashCommandBuilder()
   .addSubcommand((sc) => sc.setName('lock').setDescription('Blocca l\'accesso al tuo canale'))
   .addSubcommand((sc) => sc.setName('unlock').setDescription('Sblocca l\'accesso al tuo canale'))
   .addSubcommand((sc) => sc.setName('limit').setDescription('Cambia il limite utenti (0=illimitato)').addIntegerOption((o) => o.setName('numero').setDescription('0-99').setMinValue(0).setMaxValue(99).setRequired(true)))
-  .addSubcommand((sc) => sc.setName('kick').setDescription('Caccia un utente dal tuo canale').addUserOption((o) => o.setName('utente').setDescription('Utente da cacciare').setRequired(true)))
-  .addSubcommand((sc) => sc.setName('permit').setDescription('Riammetti un utente precedentemente bloccato').addUserOption((o) => o.setName('utente').setDescription('Utente da sbloccare').setRequired(true)))
-  .addSubcommand((sc) => sc.setName('transfer').setDescription('Trasferisci la proprietà a un altro membro').addUserOption((o) => o.setName('utente').setDescription('Nuovo proprietario (deve essere nel canale)').setRequired(true)))
+.addSubcommand((sc) => sc.setName('kick').setDescription('Cacca un utente dal tuo canale').addStringOption((o) => o.setName('utente').setDescription('Utente da cacciare (solo membri del tuo canale)').setRequired(true).setAutocomplete(true)))
+  .addSubcommand((sc) => sc.setName('permit').setDescription('Riammetti un utente precedentemente bloccato').addStringOption((o) => o.setName('utente').setDescription('Utente da sbloccare').setRequired(true).setAutocomplete(true)))
+  .addSubcommand((sc) => sc.setName('transfer').setDescription('Trasferisci la proprietà a un altro membro').addStringOption((o) => o.setName('utente').setDescription('Nuovo proprietario (deve essere nel canale)').setRequired(true).setAutocomplete(true)))
   .addSubcommand((sc) => sc.setName('claim').setDescription('Rivendica un canale temporaneo orfano (owner assente)'))
   .addSubcommand((sc) => sc.setName('info').setDescription('Mostra la configurazione del tuo canale'));
 
@@ -94,10 +102,46 @@ async function execute(interaction) {
   return handler(interaction);
 }
 
+async function autocomplete(interaction) {
+  // autocomplete solo per i subcommand che usano StringOption al posto di
+  // UserOption. Filtriamo sui membri attualmente nel canale vocale
+  // dell'utente che invoca il comando.
+  const focused = interaction.options.getFocused(true);
+  if (focused.name !== 'utente') return interaction.respond([]);
+
+  const sub = interaction.options.getSubcommand();
+  if (sub !== 'kick' && sub !== 'transfer' && sub !== 'permit') {
+    return interaction.respond([]);
+  }
+
+  const voiceChannel = interaction.member?.voice?.channel;
+  if (!voiceChannel) return interaction.respond([]);
+
+  const needle = focused.value.toLowerCase();
+  const ownerId = sub === 'permit' ? null : voiceTracker.getOwnerId(interaction.guildId, voiceChannel.id);
+
+  const choices = [];
+  for (const [, m] of voiceChannel.members) {
+    if (m.id === interaction.client.user.id) continue; // escludi il bot
+    if (sub !== 'permit' && m.id === ownerId) continue; // non puoi kickare/trasferire a te stesso
+
+    const label = m.user.globalName || m.user.username;
+    if (needle && !`${label} ${m.user.tag}`.toLowerCase().includes(needle)) continue;
+
+    choices.push({ name: label.slice(0, 100), value: m.id });
+    if (choices.length >= 25) break;
+  }
+  return interaction.respond(choices);
+}
+
 async function handleComponent(interaction) {
   // Bottoni del pannello di controllo - agiscono sul canale in cui il messaggio
   // è stato inviato (sono deprecati una volta che l'owner cambia canale, ma
   // vengono invalidati dai check di ownership).
+  if (interaction.isStringSelectMenu()) {
+    return handleSelectMenu(interaction);
+  }
+
   if (!interaction.isButton()) return false;
 
   const result = await resolveOwnedVoiceChannel(interaction);
@@ -114,16 +158,59 @@ async function handleComponent(interaction) {
     case BTN.LIMIT:
       return showLimitModal(interaction);
     case BTN.KICK:
-      return showKickModal(interaction);
+      return showKickSelect(interaction);
     case BTN.TRANSFER:
-      return showTransferModal(interaction);
+      return showTransferSelect(interaction);
     case BTN.CLAIM:
       return claimChannel(interaction, channel, temp);
     case BTN.REFRESH:
       return interaction.update({ embeds: [buildPanel(channel, temp)], components: interaction.message.components });
     default:
       return false;
+    }
+}
+
+async function handleSelectMenu(interaction) {
+  // SELECT.KICK / SELECT.TRANSFER: l'owner ha scelto un membro dal menu e ora
+  // eseguiamo l'azione corrispondente sul membro scelto.
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+
+  const targetId = interaction.values?.[0];
+  if (!targetId) return interaction.update({ embeds: [errorEmbed('Selezione vuota', 'Nessun membro selezionato.')], components: [] });
+
+  if (interaction.customId === SEL.KICK) {
+    const targetMember = await interaction.guild.members.fetch(targetId).catch(() => null);
+    if (!targetMember?.voice?.channel || targetMember.voice.channel.id !== result.channel.id) {
+      return interaction.update({ embeds: [errorEmbed('Non in canale', 'Questo utente non è più nel tuo canale.')], components: [] });
+    }
+    await repo.addBlockedUser(result.channel.id, targetId);
+    try {
+      await targetMember.voice.setChannel(null, 'voice kick');
+    } catch (err) {
+      return interaction.update({ embeds: [errorEmbed('Errore', err.message)], components: [] });
+    }
+    await syncSnapshot(interaction, result.channel);
+    return interaction.update({ embeds: [successEmbed('Cacciato', `<@${targetId}> è stato cacciato. Usa \`/voice permit\` per riammesso.`)], components: [] });
   }
+
+  if (interaction.customId === SEL.TRANSFER) {
+    if (targetId === result.temp.owner_id) {
+      return interaction.update({ embeds: [errorEmbed('Sei già proprietario', 'Sei già il proprietario.')], components: [] });
+    }
+    const targetMember = await interaction.guild.members.fetch(targetId).catch(() => null);
+    if (!targetMember?.voice?.channel || targetMember.voice.channel.id !== result.channel.id) {
+      return interaction.update({ embeds: [errorEmbed('Non in canale', 'Il nuovo proprietario deve essere nel canale.')], components: [] });
+    }
+    await repo.transferTempOwnership(result.channel.id, targetId);
+    voiceTracker.set(interaction.guildId, result.channel.id, targetId);
+    await voiceStateEvent.renameForNewOwner(result.channel, targetMember);
+    const fresh = await repo.getTempChannel(result.channel.id);
+    if (fresh) await voiceStateEvent.liveSyncVoiceRoom(result.channel, { ...fresh, owner_id: targetId, guild_id: interaction.guildId });
+    return interaction.update({ embeds: [successEmbed('Trasferito', `<@${targetId}> è ora il proprietario del canale.`)], components: [] });
+  }
+
+  return false;
 }
 
 async function handleModal(interaction) {
@@ -155,51 +242,7 @@ async function handleModal(interaction) {
       return interaction.reply({ embeds: [errorEmbed('Errore', err.message)], flags: MessageFlags.Ephemeral });
     }
     await syncSnapshot(interaction, voiceChan);
-    return interaction.reply({ embeds: [successEmbed('Limite aggiornato', n === 0 ? 'Illimitato.' : `Massimo **${n}** utenti.`)], flags: MessageFlags.Ephemeral });
-  }
-
-  if (interaction.customId === MODAL.KICK) {
-    const userId = interaction.fields.getTextInputValue('utente')?.trim();
-    if (!/^\d{17,20}$/.test(userId)) {
-      return interaction.reply({ embeds: [errorEmbed('ID non valido', 'Inserisci un ID utente valido.')], flags: MessageFlags.Ephemeral });
-    }
-    const guild = interaction.guild;
-    const member = await guild.members.fetch(userId).catch(() => null);
-    if (!member?.voice?.channel || member.voice.channel.id !== voiceChan.id) {
-      return interaction.reply({ embeds: [errorEmbed('Non in canale', 'Questo utente non è nel tuo canale.')], flags: MessageFlags.Ephemeral });
-    }
-    await repo.addBlockedUser(voiceChan.id, userId);
-    try {
-      await member.voice.setChannel(null, 'voice kick');
-    } catch (err) {
-      return interaction.reply({ embeds: [errorEmbed('Errore', err.message)], flags: MessageFlags.Ephemeral });
-    }
-    await syncSnapshot(interaction, voiceChan);
-    return interaction.reply({ embeds: [successEmbed('Cacciato', `<@${userId}> è stato cacciato e non potrà rientrare finché non lo sblocchi.`)], flags: MessageFlags.Ephemeral });
-  }
-
-  if (interaction.customId === MODAL.TRANSFER) {
-    const userId = interaction.fields.getTextInputValue('utente')?.trim();
-    if (!/^\d{17,20}$/.test(userId)) {
-      return interaction.reply({ embeds: [errorEmbed('ID non valido', 'Inserisci un ID utente valido.')], flags: MessageFlags.Ephemeral });
-    }
-    if (userId === temp.owner_id) {
-      return interaction.reply({ embeds: [errorEmbed('Sei già proprietario', 'Quel membro è già il proprietario.')], flags: MessageFlags.Ephemeral });
-    }
-    const member = await interaction.guild.members.fetch(userId).catch(() => null);
-    if (!member?.voice?.channel || member.voice.channel.id !== voiceChan.id) {
-      return interaction.reply({ embeds: [errorEmbed('Non in canale', 'Il nuovo proprietario deve essere nel canale.')], flags: MessageFlags.Ephemeral });
-    }
-    await repo.transferTempOwnership(voiceChan.id, userId);
-    voiceTracker.set(interaction.guildId, voiceChan.id, userId);
-    await voiceStateEvent.renameForNewOwner(voiceChan, member);
-    // Lo snapshot seguirà il nuovo owner (la chiave è guild+ownerId+hubId).
-    const fresh = await repo.getTempChannel(voiceChan.id);
-    if (fresh) await voiceStateEvent.liveSyncVoiceRoom(voiceChan, { ...fresh, owner_id: userId, guild_id: interaction.guildId });
-    return interaction.reply({ embeds: [successEmbed('Trasferito', `<@${userId}> è ora il proprietario del canale. Il pannello di controllo è stato trasferito.`)], flags: MessageFlags.Ephemeral });
-  }
-
-  return false;
+return interaction.reply({ embeds: [successEmbed('Limite aggiornato', n === 0 ? 'Illimitato.' : `Massimo **${n}** utenti.`)], flags: MessageFlags.Ephemeral });
 }
 
 const SUBCOMMAND_HANDLERS = {
@@ -213,6 +256,7 @@ const SUBCOMMAND_HANDLERS = {
   transfer: cmdTransfer,
   claim: cmdClaim,
   info: cmdInfo,
+};
 };
 
 // --- create (canale testuale temporaneo, legacy) --------------------------
@@ -335,32 +379,34 @@ async function cmdKick(interaction) {
   const result = await resolveOwnedVoiceChannel(interaction);
   if (!result.ok) return result.reply;
 
-  const target = interaction.options.getUser('utente');
-  const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+  const targetId = interaction.options.getString('utente');
+  if (!/^\d{17,20}$/.test(targetId)) return error(interaction, 'Utente non valido.');
+  const member = await interaction.guild.members.fetch(targetId).catch(() => null);
   if (!member?.voice?.channel || member.voice.channel.id !== result.channel.id) {
     return error(interaction, 'Questo utente non è nel tuo canale.');
   }
-  if (target.id === result.temp.owner_id) {
+  if (targetId === result.temp.owner_id) {
     return error(interaction, 'Non puoi cacciare te stesso.');
   }
-  await repo.addBlockedUser(result.channel.id, target.id);
+  await repo.addBlockedUser(result.channel.id, targetId);
   try {
     await member.voice.setChannel(null, 'voice kick');
   } catch (err) {
     return error(interaction, err.message);
   }
   await syncSnapshot(interaction, result.channel);
-  return interaction.reply({ embeds: [successEmbed('Cacciato', `<@${target.id}> è stato cacciato. Usa \`/voice permit\` per riammesso.`)], flags: MessageFlags.Ephemeral });
+  return interaction.reply({ embeds: [successEmbed('Cacciato', `<@${targetId}> è stato cacciato. Usa \`/voice permit\` per riammesso.`)], flags: MessageFlags.Ephemeral });
 }
 
 async function cmdPermit(interaction) {
   const result = await resolveOwnedVoiceChannel(interaction);
   if (!result.ok) return result.reply;
 
-  const target = interaction.options.getUser('utente');
-  await repo.removeBlockedUser(result.channel.id, target.id);
+  const targetId = interaction.options.getString('utente');
+  if (!/^\d{17,20}$/.test(targetId)) return error(interaction, 'Utente non valido.');
+  await repo.removeBlockedUser(result.channel.id, targetId);
   await syncSnapshot(interaction, result.channel);
-  return interaction.reply({ embeds: [successEmbed('Riammesso', `<@${target.id}> può rientrare.`)], flags: MessageFlags.Ephemeral });
+  return interaction.reply({ embeds: [successEmbed('Riammesso', `<@${targetId}> può rientrare.`)], flags: MessageFlags.Ephemeral });
 }
 
 // --- transfer -------------------------------------------------------------
@@ -369,21 +415,22 @@ async function cmdTransfer(interaction) {
   const result = await resolveOwnedVoiceChannel(interaction);
   if (!result.ok) return result.reply;
 
-  const target = interaction.options.getUser('utente');
-  if (target.id === result.temp.owner_id) {
+  const targetId = interaction.options.getString('utente');
+  if (!/^\d{17,20}$/.test(targetId)) return error(interaction, 'Utente non valido.');
+  if (targetId === result.temp.owner_id) {
     return error(interaction, 'Sei già il proprietario.');
   }
-  const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+  const member = await interaction.guild.members.fetch(targetId).catch(() => null);
   if (!member?.voice?.channel || member.voice.channel.id !== result.channel.id) {
     return error(interaction, 'Il nuovo proprietario deve essere nel canale.');
   }
-  await repo.transferTempOwnership(result.channel.id, target.id);
-  voiceTracker.set(interaction.guildId, result.channel.id, target.id);
+  await repo.transferTempOwnership(result.channel.id, targetId);
+  voiceTracker.set(interaction.guildId, result.channel.id, targetId);
   await voiceStateEvent.renameForNewOwner(result.channel, member);
   // Lo snapshot passa al nuovo owner.
   const fresh = await repo.getTempChannel(result.channel.id);
-  if (fresh) await voiceStateEvent.liveSyncVoiceRoom(result.channel, { ...fresh, owner_id: target.id, guild_id: interaction.guildId });
-  return interaction.reply({ embeds: [successEmbed('Trasferito', `<@${target.id}> è ora il proprietario del canale.`)], flags: MessageFlags.Ephemeral });
+  if (fresh) await voiceStateEvent.liveSyncVoiceRoom(result.channel, { ...fresh, owner_id: targetId, guild_id: interaction.guildId });
+  return interaction.reply({ embeds: [successEmbed('Trasferito', `<@${targetId}> è ora il proprietario del canale.`)], flags: MessageFlags.Ephemeral });
 }
 
 // --- claim ----------------------------------------------------------------
@@ -492,25 +539,6 @@ function buildLimitModal() {
   };
 }
 
-function buildKickModal() {
-  return {
-    title: 'Caccia un utente',
-    customId: MODAL.KICK,
-    components: [[
-      { customId: 'utente', label: 'ID utente da cacciare', style: 1, minLength: 17, maxLength: 20, required: true },
-    ]],
-  };
-}
-
-function buildTransferModal() {
-  return {
-    title: 'Trasferisci proprietà',
-    customId: MODAL.TRANSFER,
-    components: [[
-      { customId: 'utente', label: 'ID del nuovo proprietario', style: 1, minLength: 17, maxLength: 20, required: true },
-    ]],
-  };
-}
 
 function showRenameModal(interaction) {
   return interaction.showModal(buildModalFromSpec(buildRenameModal()));
@@ -518,11 +546,55 @@ function showRenameModal(interaction) {
 function showLimitModal(interaction) {
   return interaction.showModal(buildModalFromSpec(buildLimitModal()));
 }
-function showKickModal(interaction) {
-  return interaction.showModal(buildModalFromSpec(buildKickModal()));
+
+// Bottoni KICK / TRANSFER: invece di un modal che chiede un ID (scomodo),
+// apriamo un select menu con i membri attuali del canale. Discord permette
+// fino a 25 option in un select, ma in un voice channel il limite è quasi
+// mai un problema.
+function buildMemberSelectRow(interaction, customId, placeholder, exclude) {
+  const voiceChannel = interaction.member?.voice?.channel;
+  if (!voiceChannel) return null;
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(customId)
+    .setPlaceholder(placeholder)
+    .setMinValues(1)
+    .setMaxValues(1);
+  let count = 0;
+  for (const [, m] of voiceChannel.members) {
+    if (m.id === interaction.client.user.id) continue;
+    if (exclude && m.id === exclude) continue;
+    if (count >= 25) break;
+    menu.addOptions({
+      label: (m.user.globalName || m.user.username).slice(0, 100),
+      description: (m.user.tag || '').slice(0, 100) || undefined,
+      value: m.id,
+    });
+    count += 1;
+  }
+  if (count === 0) return null;
+  return new ActionRowBuilder().addComponents(menu);
 }
-function showTransferModal(interaction) {
-  return interaction.showModal(buildModalFromSpec(buildTransferModal()));
+
+function showKickSelect(interaction) {
+  const row = buildMemberSelectRow(
+    interaction,
+    SEL.KICK,
+    'Scegli chi cacciare',
+    interaction.user.id,
+  );
+  if (!row) return interaction.reply({ embeds: [errorEmbed('Nessun membro', 'Non c\'è nessuno da cacciare nel tuo canale.')], flags: MessageFlags.Ephemeral });
+  return interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
+}
+
+function showTransferSelect(interaction) {
+  const row = buildMemberSelectRow(
+    interaction,
+    SEL.TRANSFER,
+    'Scegli il nuovo proprietario',
+    interaction.user.id,
+  );
+  if (!row) return interaction.reply({ embeds: [errorEmbed('Nessun candidato', 'Non c\'è nessun membro a cui trasferire il canale.')], flags: MessageFlags.Ephemeral });
+  return interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
 }
 
 function buildModalFromSpec(spec) {
@@ -599,4 +671,4 @@ function error(interaction, msg) {
   return interaction.reply({ embeds: [errorEmbed('Errore', msg)], flags: MessageFlags.Ephemeral });
 }
 
-module.exports = { data, execute, handleComponent, handleModal, BTN, MODAL, sendControlPanel };
+module.exports = { data, execute, autocomplete, handleComponent, handleModal, BTN, MODAL, SEL, sendControlPanel };
