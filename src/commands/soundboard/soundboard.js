@@ -76,6 +76,7 @@ async function cmdAdd(interaction) {
 
   const file = interaction.options.getAttachment('file');
   const maxBytes = config.features.soundboards.maxFileSizeMb * 1024 * 1024;
+  if (!file.size || file.size <= 0) return error(interaction, 'File vuoto.');
   if (file.size > maxBytes) return error(interaction, `Massimo ${config.features.soundboards.maxFileSizeMb}MB.`);
 
   if (!AUDIO_MIME.test(file.contentType || '') && !hasAllowedExt(file.name)) {
@@ -97,6 +98,7 @@ async function cmdPlay(interaction) {
   if (!voice?.channel) return error(interaction, 'Entra in un canale vocale.');
 
   const name = safeName(interaction.options.getString('nome'));
+  if (!name) return error(interaction, 'Usa lettere, numeri, _, -.');
   const sb = await repo.getSoundboard(interaction.guildId, name);
   if (!sb) return error(interaction, `Nessun suono "${name}".`);
   if (!fs.existsSync(sb.file_path)) return error(interaction, 'File audio mancante su disco.');
@@ -131,6 +133,7 @@ async function cmdList(interaction) {
 
 async function cmdDelete(interaction) {
   const name = safeName(interaction.options.getString('nome'));
+  if (!name) return error(interaction, 'Usa lettere, numeri, _, -.');
   const sb = await repo.getSoundboard(interaction.guildId, name);
   if (!sb) return error(interaction, `Nessun suono "${name}".`);
   if (sb.user_id !== interaction.user.id) return error(interaction, 'Puoi eliminare solo i tuoi suoni.');
@@ -143,6 +146,7 @@ async function cmdDelete(interaction) {
 async function cmdRename(interaction) {
   const oldName = safeName(interaction.options.getString('vecchio_nome'));
   const newName = safeName(interaction.options.getString('nuovo_nome'));
+  if (!oldName || !newName) return error(interaction, 'Usa lettere, numeri, _, -.');
 
   const sb = await repo.getSoundboard(interaction.guildId, oldName);
   if (!sb) return error(interaction, `Nessun suono "${oldName}".`);
@@ -168,7 +172,11 @@ async function cmdStop(interaction) {
 // --- Helper ---------------------------------------------------------------
 
 function safeName(raw) {
-  return raw.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').slice(0, 50);
+  const cleaned = raw.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').slice(0, 50);
+  // Se dopo la sanificazione il nome è vuoto o solo trattini, ritorna null così
+  // il chiamante può rifiutare l'input. Evita file chiamati ".mp3" o "---.mp3".
+  if (!cleaned || /^[-_]+$/.test(cleaned)) return null;
+  return cleaned;
 }
 
 function hasAllowedExt(filename) {

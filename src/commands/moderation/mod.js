@@ -62,7 +62,12 @@ async function cmdBan(interaction) {
   const durationStr = interaction.options.getString('durata');
   const deleteDays = interaction.options.getInteger('giorni_messaggi') || DEFAULT_DELETE_DAYS;
 
+  // Evita self-ban e ban su utenti con permessi superiori al moderator.
+  if (target.id === interaction.user.id) return replyError(interaction, 'Non puoi bannare te stesso.');
+  if (target.id === interaction.guild.ownerId) return replyError(interaction, 'Non puoi bannare il proprietario del server.');
+
   const member = await fetchMember(interaction, target.id);
+  if (member && !canModerate(interaction.member, member)) return replyError(interaction, 'Non posso bannare questo utente (ruolo troppo alto).');
   if (member && !member.bannable) return replyError(interaction, 'Non posso bannare questo utente.');
 
   const duration = parseDuration(durationStr);
@@ -86,8 +91,12 @@ async function cmdKick(interaction) {
   const target = interaction.options.getUser('utente');
   const reason = interaction.options.getString('motivo') || REASON_FALLBACK;
 
+  if (target.id === interaction.user.id) return replyError(interaction, 'Non puoi espellere te stesso.');
+  if (target.id === interaction.guild.ownerId) return replyError(interaction, 'Non puoi espellere il proprietario del server.');
+
   const member = await fetchMember(interaction, target.id);
   if (!member) return replyError(interaction, 'Utente non presente nel server.');
+  if (!canModerate(interaction.member, member)) return replyError(interaction, 'Non posso espellere questo utente (ruolo troppo alto).');
   if (!member.kickable) return replyError(interaction, 'Non posso espellere questo utente.');
 
   await member.kick(reason);
@@ -104,8 +113,12 @@ async function cmdMute(interaction) {
   const duration = parseDuration(durationStr);
   if (!duration) return replyError(interaction, 'Usa una durata valida come 10m, 1h, 1d.');
 
+  if (target.id === interaction.user.id) return replyError(interaction, 'Non puoi silenziare te stesso.');
+  if (target.id === interaction.guild.ownerId) return replyError(interaction, 'Non puoi silenziare il proprietario del server.');
+
   const member = await fetchMember(interaction, target.id);
   if (!member) return replyError(interaction, 'Utente non presente nel server.');
+  if (!canModerate(interaction.member, member)) return replyError(interaction, 'Non posso silenziare questo utente (ruolo troppo alto).');
   if (!member.moderatable) return replyError(interaction, 'Non posso silenziare questo utente.');
 
   await member.timeout(duration, reason);
@@ -203,6 +216,18 @@ async function cmdUnlock(interaction) {
 
 async function fetchMember(interaction, userId) {
   return interaction.guild.members.fetch(userId).catch(() => null);
+}
+
+// Verifica gerarchia ruoli: il moderator deve avere un ruolo più alto del
+// target, altrimenti non può (e non dovrebbe poterlo) moderarlo.
+// Il proprietario del guild può moderare chiunque (gestito dal chiamante con
+// check separato su guild.ownerId).
+function canModerate(moderator, target) {
+  if (!moderator || !target) return false;
+  // Il proprietario del guild può moderare tutti.
+  if (moderator.id === moderator.guild.ownerId) return true;
+  // Non puoi moderare chi è sopra di te.
+  return moderator.roles.highest.comparePositionTo(target.roles.highest) > 0;
 }
 
 function scheduleTempUnban(guild, userId, durationMs) {

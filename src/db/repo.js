@@ -80,6 +80,42 @@ async function addWallet(userId, guildId, amount) {
   });
 }
 
+// Claim atomico del daily: aggiorna lastDaily SOLO se è scaduto. Ritorna
+// il numero di righe aggiornate: 0 = cooldown ancora attivo, 1 = claim OK.
+// Usato da cmdDaily per evitare la race condition classica (read-then-write).
+async function claimDailyIfElapsed(userId, guildId, now, cooldownSeconds, fields) {
+  await ensureUser(userId, guildId);
+  const minElapsedAt = now - cooldownSeconds;
+  const updated = await prisma.user.updateMany({
+    where: {
+      userId_guildId: { userId, guildId },
+      OR: [
+        { lastDaily: 0 },
+        { lastDaily: { lt: minElapsedAt } },
+      ],
+    },
+    data: { ...fields, lastDaily: now },
+  });
+  return updated.count > 0;
+}
+
+// Come claimDailyIfElapsed, per work.
+async function claimWorkIfElapsed(userId, guildId, now, cooldownSeconds, fields) {
+  await ensureUser(userId, guildId);
+  const minElapsedAt = now - cooldownSeconds;
+  const updated = await prisma.user.updateMany({
+    where: {
+      userId_guildId: { userId, guildId },
+      OR: [
+        { lastWork: 0 },
+        { lastWork: { lt: minElapsedAt } },
+      ],
+    },
+    data: { ...fields, lastWork: now },
+  });
+  return updated.count > 0;
+}
+
 async function transfer(fromId, toId, guildId, amount) {
   await ensureUser(fromId, guildId);
   await ensureUser(toId, guildId);
@@ -615,6 +651,12 @@ async function createPokerTable(id, guildId, channelId, hostId, smallBlind) {
   });
 }
 
+async function getPokerTable(tableId) {
+  const row = await prisma.pokerTable.findUnique({ where: { id: tableId } });
+  if (!row) return null;
+  return toSnake(row);
+}
+
 async function getPokerTableByChannel(channelId) {
   const row = await prisma.pokerTable.findFirst({
     where: { channelId },
@@ -765,7 +807,7 @@ module.exports = {
   prisma,
   now,
   ensureUser, getUser, updateUser,
-  addWallet, transfer,
+  addWallet, transfer, claimDailyIfElapsed, claimWorkIfElapsed,
   xpForLevel, levelForXp, addXp, topXp, topWallet,
   addWarn, getWarns, countWarns, clearWarns, addModLog,
   createTicket, getOpenTicketByUser, getOpenTicketByChannel, getTicketByChannel, claimTicket, closeTicket, countOpenTickets,
@@ -778,7 +820,7 @@ module.exports = {
   createSoundboard, getSoundboard, listSoundboards, searchSoundboards, deleteSoundboard, incrementSoundboardPlays, renameSoundboard,
   saveGameSession, getGameSession, deleteGameSession,
   saveBlackjackSession, getBlackjackSession, deleteBlackjackSession,
-  createPokerTable, getPokerTableByChannel, updatePokerTable, deletePokerTable,
+  createPokerTable, getPokerTable, getPokerTableByChannel, updatePokerTable, deletePokerTable,
   getPokerPlayer, upsertPokerPlayer, deletePokerPlayer, listPokerPlayers, getPokerTableGuildId,
   getGuildConfig, setGuildConfig,
   getGuildSettings, getGuildSetting, setGuildSetting, deleteGuildSetting,

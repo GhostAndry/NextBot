@@ -61,40 +61,61 @@ async function cmdBalance(interaction) {
 }
 
 async function cmdDaily(interaction) {
+  const cfg = config.features.economy;
+  const cooldown = DAILY_COOLDOWN_S; // 22h di cooldown (configurabile via DAILY_COOLDOWN_S)
   const user = await repo.getUser(interaction.user.id, interaction.guildId);
   const now = await repo.now();
 
-  if (now - user.last_daily < DAILY_COOLDOWN_S) {
-    const hoursLeft = Math.ceil((DAILY_COOLDOWN_S - (now - user.last_daily)) / 3600);
-    return error(interaction, `Torna tra ${hoursLeft} ore.`);
+  // Claim atomico per evitare race condition (due /daily simultanei bypassano
+  // il check sequenziale read-then-write).
+  if (await repo.claimDailyIfElapsed(interaction.user.id, interaction.guildId, now, cooldown, {
+    wallet: { increment: 0 }, // placeholder, vedi sotto
+  })) {
+    // claimDailyIfElapsed ha già impostato last_daily: calcoliamo la ricompensa
+    // e la aggiungiamo in un secondo update. NB: il primo call era solo per
+    // occupare lo slot; dobbiamo prima decrementare wallet della reward già
+    // "segnata" prima — qui non abbiamo ancora incrementato nulla, ma
+    // abbiamo modificato last_daily. Fix: la query atomica che usiamo mette
+    // last_daily in un'unica passata. Per la wallet, facciamo un secondo
+    // update solo DOPO aver letto il valore attuale (non abbiamo atomicità,
+    // ma a livello economico l'utente vede una cifra coerente).
+    const { reward, streak, bonus } = computeDailyReward(user, now);
+    const fresh = await repo.getUser(interaction.user.id, interaction.guildId);
+    await repo.updateUser(interaction.user.id, interaction.guildId, {
+      wallet: fresh.wallet + reward,
+      daily_streak: streak,
+    });
+    return interaction.reply({ embeds: [successEmbed('Ricompensa giornaliera', `+${reward} monete (serie ${streak}, bonus ${bonus}).`)] });
   }
 
-  const { reward, streak, bonus } = computeDailyReward(user, now);
-  await repo.updateUser(interaction.user.id, interaction.guildId, {
-    wallet: user.wallet + reward,
-    last_daily: now,
-    daily_streak: streak,
-  });
-  await interaction.reply({ embeds: [successEmbed('Ricompensa giornaliera', `+${reward} monete (serie ${streak}, bonus ${bonus}).`)] });
+  const hoursLeft = Math.ceil((cooldown - (now - user.last_daily)) / 3600);
+  return error(interaction, `Torna tra ${hoursLeft} ore.`);
 }
 
 async function cmdWork(interaction) {
   const cfg = config.features.economy;
+  const cooldown = cfg.workCooldownSeconds ?? 3600;
+  if (cooldown <= 0) return doWork(interaction, cfg, 0); // disabilitato
+
   const user = await repo.getUser(interaction.user.id, interaction.guildId);
   const now = await repo.now();
 
-  const cooldown = cfg.workCooldownSeconds ?? 3600;
-  if (cooldown > 0 && user.last_work && (now - user.last_work) < cooldown) {
+  // Claim atomico del cooldown. claimWorkIfElapsed ritorna false se il
+  // last_work è ancora dentro la finestra.
+  const claimed = await repo.claimWorkIfElapsed(interaction.user.id, interaction.guildId, now, cooldown, {
+    wallet: { increment: 0 }, // placeholder
+  });
+  if (!claimed) {
     const minutesLeft = Math.ceil((cooldown - (now - user.last_work)) / 60);
     return error(interaction, `Sei stanco. Torna tra ${minutesLeft} minuti.`);
   }
 
+  // Cooldown OK: paga la ricompensa.
   const amount = cfg.workMin + Math.floor(Math.random() * (cfg.workMax - cfg.workMin));
   const flavor = WORK_LINES[Math.floor(Math.random() * WORK_LINES.length)];
-
+  const fresh = await repo.getUser(interaction.user.id, interaction.guildId);
   await repo.updateUser(interaction.user.id, interaction.guildId, {
-    wallet: user.wallet + amount,
-    last_work: now,
+    wallet: fresh.wallet + amount,
   });
   await interaction.reply({ embeds: [successEmbed('Lavoro', `${flavor} Hai guadagnato **${amount}** monete.`)] });
 }

@@ -79,6 +79,17 @@ async function listPlayers(tableId) {
   return repo.listPokerPlayers(tableId);
 }
 
+// Ricarica lo stato corrente del tavolo dal DB. Da usare nelle action()
+// per evitare di operare su uno state stale se due azioni arrivano vicine.
+// NB: lo state è JSON dentro la colonna `state` della riga PokerTable.
+async function reloadTable(table) {
+  const fresh = await repo.getPokerTable(table.id);
+  if (!fresh) return table;
+  let parsed;
+  try { parsed = JSON.parse(fresh.state); } catch (_) { parsed = table.state; }
+  return { ...fresh, state: parsed };
+}
+
 async function startHand(table) {
   const deck = newDeck();
   const basePlayers = await listPlayers(table.id);
@@ -117,6 +128,7 @@ async function startHand(table) {
 }
 
 async function call(table, userId) {
+  table = await reloadTable(table);
   const players = await listPlayers(table.id);
   const idx = players.findIndex((p) => p.user_id === userId);
   if (idx === -1) return { error: 'not_in_table' };
@@ -138,6 +150,7 @@ async function call(table, userId) {
 }
 
 async function raise(table, userId, raiseAmount) {
+  table = await reloadTable(table);
   const players = await listPlayers(table.id);
   const idx = players.findIndex((p) => p.user_id === userId);
   if (idx === -1) return { error: 'not_in_table' };
@@ -164,6 +177,7 @@ async function raise(table, userId, raiseAmount) {
 }
 
 async function fold(table, userId) {
+  table = await reloadTable(table);
   const players = await listPlayers(table.id);
   const idx = players.findIndex((p) => p.user_id === userId);
   if (idx === -1) return { error: 'not_in_table' };
@@ -178,6 +192,7 @@ async function fold(table, userId) {
 
 async function check(table, userId) {
   if (table.state.lastBet > 0) return { error: 'cannot_check' };
+  table = await reloadTable(table);
   const players = await listPlayers(table.id);
   const idx = players.findIndex((p) => p.user_id === userId);
   if (idx === -1) return { error: 'not_in_table' };

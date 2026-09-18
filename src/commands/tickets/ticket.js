@@ -15,6 +15,11 @@ const TICKET_CLOSE_CANCEL_ID = 'ticket:closecancel';
 const TICKET_OPEN_ID = 'ticket:open';
 const TICKET_FORM_ID = 'ticket:form';
 
+// Protezione contro doppio click "Conferma chiusura". Senza questo set, due
+// click consecutivi (es. prima del re-render del messaggio) fanno partire
+// `finalizeTicket` due volte: due transcript, due log, due cancellazioni.
+const closingTickets = new Set();
+
 // --- Definizione comando ---------------------------------------------------
 
 const data = new SlashCommandBuilder()
@@ -270,6 +275,15 @@ async function onCloseConfirmButton(interaction) {
     await interaction.update({ embeds: [errorEmbed('Permesso negato', 'Non puoi chiudere questo ticket.')], components: [] });
     return true;
   }
+
+  // Idempotency: protezione contro doppio click. Il primo click wins,
+  // i successivi ricevono un messaggio ephemeral senza rilanciare effetti.
+  if (closingTickets.has(interaction.channelId)) {
+    return interaction.reply({ embeds: [errorEmbed('Già in corso', 'La chiusura è già stata avviata.')], flags: MessageFlags.Ephemeral });
+  }
+  closingTickets.add(interaction.channelId);
+  // Rilascia il lock dopo che il canale sarà eliminato (5s + margine).
+  setTimeout(() => closingTickets.delete(interaction.channelId), CLOSE_DELAY_MS * 2);
 
   await interaction.update({
     embeds: [successEmbed('Chiusura in corso', 'Il ticket verrà eliminato tra 5 secondi.')],

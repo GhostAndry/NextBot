@@ -23,16 +23,22 @@ const data = new ContextMenuCommandBuilder()
 
 // Risoluzione ownership duplicata (piccola, evita import circolari con
 // tempchannel.js che è il command "voice").
+// NB: `reply` è una *funzione* che risponde all'interaction, non una Promise.
+// Il vecchio `interaction.reply.bind(...)` ritornava una Promise parzialmente
+// applicata che non veniva mai chiamata, lasciando l'utente in attesa fino al
+// timeout di Discord. Ora restituiamo una callback che chiama `reply()`.
 async function resolveOwnedVoiceChannel(interaction) {
+  const reply = (msg) => interaction.reply({ embeds: [errorEmbed('Errore', msg)], flags: MessageFlags.Ephemeral });
+
   const voiceChannel = interaction.member.voice?.channel;
-  if (!voiceChannel) return { ok: false, reply: interaction.reply.bind(interaction, { embeds: [errorEmbed('Errore', 'Entra prima in un canale vocale.')], flags: MessageFlags.Ephemeral }) };
+  if (!voiceChannel) return { ok: false, reply: () => reply('Entra prima in un canale vocale.') };
 
   const temp = await repo.getTempChannel(voiceChannel.id);
   if (!temp || temp.kind !== 'voice') {
-    return { ok: false, reply: interaction.reply.bind(interaction, { embeds: [errorEmbed('Errore', 'Questo canale non è un temp voice.')], flags: MessageFlags.Ephemeral }) };
+    return { ok: false, reply: () => reply('Questo canale non è un temp voice.') };
   }
   if (temp.owner_id !== interaction.user.id) {
-    return { ok: false, reply: interaction.reply.bind(interaction, { embeds: [errorEmbed('Errore', 'Solo il proprietario può usare questo comando.')], flags: MessageFlags.Ephemeral }) };
+    return { ok: false, reply: () => reply('Solo il proprietario può usare questo comando.') };
   }
   return { ok: true, channel: voiceChannel, temp };
 }

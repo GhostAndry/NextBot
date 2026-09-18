@@ -27,7 +27,12 @@ const OWNER_PREFIX = '👑 ';
 const pendingDeletes = new Map();
 // Protegge dal invio multiplo del pannello di controllo: anche se lo stesso
 // canale triggera Caso 3 più volte, il pannello arriva una volta sola.
-const panelSentFor = new Set();
+// Usiamo una Map+expires invece di un Set per evitare memory leak: se il
+// `channelDelete` non triggera (canale esterno, server glitch, ecc.) l'entry
+// resta solo per `PANEL_TTL_MS`, poi viene ignorata e rimossa al prossimo tick.
+const PANEL_TTL_MS = 24 * 60 * 60 * 1000;
+const panelSentFor = new Map();
+let lastPanelGc = 0;
 
 module.exports = {
   name: 'voiceStateUpdate',
@@ -72,9 +77,12 @@ module.exports = {
           await enforceBlockedAndLocked(channel, temp);
           // Anti-doppio-pannello: se Caso 3 viene triggerato più volte per lo
           // stesso canale (es. self-deaf toggle, riconnessioni), inviamo solo
-          // il primo. Si resetta quando il canale viene eliminato (channelDelete).
-          if (!panelSentFor.has(channel.id)) {
-            panelSentFor.add(channel.id);
+          // il primo. Le entry scadono dopo PANEL_TTL_MS per evitare leak.
+          const now = Date.now();
+          gcPanelSent(now);
+          const sentAt = panelSentFor.get(channel.id);
+          if (!sentAt || now - sentAt > PANEL_TTL_MS) {
+            panelSentFor.set(channel.id, now);
             tempChannelModule.sendControlPanel(channel);
           }
         }
@@ -84,6 +92,15 @@ module.exports = {
   renameForNewOwner,
   OWNER_PREFIX,
 };
+
+function gcPanelSent(now) {
+  // GC pigro: una volta ogni 10 minuti svuotiamo le entry scadute.
+  if (now - lastPanelGc < 10 * 60 * 1000) return;
+  lastPanelGc = now;
+  for (const [id, sentAt] of panelSentFor) {
+    if (now - sentAt > PANEL_TTL_MS) panelSentFor.delete(id);
+  }
+}
 
 function clearPanelSent(channelId) {
   if (channelId) panelSentFor.delete(channelId);
@@ -113,8 +130,19 @@ function invalidateHubCache(guildId) {
 async function enforceBlockedAndLocked(channel, temp) {
   // Rispetta la modalità lock + il blocco per singolo utente.
   if (!temp.locked && !(temp.blocked && temp.blocked.length)) return;
+
+  // Discord popola `channel.members` in modo asincrono. Se veniamo chiamati
+  // appena dopo un voiceStateUpdate di join, può essere ancora vuoto in cache.
+  // Forza un fetch esplicito per essere sicuri di vedere il membro appena
+  // entrato (specialmente quello che ha scatenato l'evento).
+  let members = channel.members;
+  if (!members || members.size === 0) {
+    try { await channel.fetch(); } catch (_) {}
+    members = channel.members;
+  }
+
   const allow = new Set([temp.owner_id, channel.guild.members.me.id]);
-  for (const [, member] of channel.members) {
+  for (const [, member] of members) {
     if (allow.has(member.id)) continue;
     const blocked = Array.isArray(temp.blocked) && temp.blocked.includes(member.id);
     if (blocked || temp.locked) {
@@ -257,10 +285,20 @@ async function renameForNewOwner(channel, newOwnerMember) {
 }
 
 async function scheduleEmptyDelete(state) {
+  // `state.guild` può essere null se il bot è appena uscito dal guild o se
+  // l'evento arriva mentre il client sta riconnettendo. In quel caso non
+  // abbiamo canali da cancellare via API: rimuoviamo solo la riga DB per
+  // evitare leak e ritorniamo.
+  const guild = state.guild;
+  if (!guild) {
+    await repo.removeTempChannel(state.channelId).catch(() => {});
+    return;
+  }
+
   const temp = await repo.getTempChannel(state.channelId);
   if (!temp || temp.kind !== 'voice') return;
 
-  const channel = state.guild.channels.cache.get(state.channelId);
+  const channel = guild.channels.cache.get(state.channelId);
   if (!channel) return;
 
   if (channel.members.size > 0) {
