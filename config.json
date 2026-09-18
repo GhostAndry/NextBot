@@ -111,7 +111,17 @@
       "workMax": 200,
       "workCooldownSeconds": 3600,
       "robSuccessRate": 0.4,
-      "robMaxPercent": 0.25
+      "robMaxPercent": 0.25,
+      "bughunt": {
+        "enabled": true,
+        "size": 5,
+        "bugCount": 6,
+        "goldCount": 8,
+        "goldMin": 25,
+        "goldMax": 75,
+        "bet": 50,
+        "cooldownSeconds": 60
+      }
     },
 
     "poker": {
