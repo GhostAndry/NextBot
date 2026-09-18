@@ -1,6 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
+const { joinVoiceChannel, getVoiceConnection } = require('@discordjs/voice');
 const config = require('../../config');
 const { errorEmbed, successEmbed } = require('../../utils/helpers');
 const logger = require('../../utils/logger');
@@ -56,9 +57,24 @@ async function startSession(interaction) {
   // Defer: l'azione di entrare nel canale potrebbe richiedere >3s su guild grandi.
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  // Entra nel canale sorgente.
+  // Entra nel canale sorgente. Usiamo joinVoiceChannel invece di me.voice.setChannel
+  // perché setChannel richiede che il bot sia già connesso a un canale vocale;
+  // joinVoiceChannel crea la connessione da zero (o riusa quella esistente).
   try {
-    await me.voice.setChannel(sourceChannel, 'voicemove: pronto a spostare');
+    // Se il bot è già connesso in questo guild a un altro canale, prima
+    // disconnettilo per evitare conflitti.
+    const existing = getVoiceConnection(interaction.guildId);
+    if (existing) {
+      existing.destroy();
+      // Piccola pausa per dare al gateway tempo di elaborare la disconnessione.
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    joinVoiceChannel({
+      guildId: interaction.guildId,
+      channelId: sourceChannel.id,
+      adapterCreator: interaction.guild.voiceAdapterCreator,
+      selfDeaf: true,
+    });
   } catch (err) {
     return interaction.editReply({ embeds: [errorEmbed('Errore', `Impossibile entrare nel tuo canale: ${err.message}`)] });
   }
@@ -183,8 +199,6 @@ async function executeMove(session, destination) {
 
   await notifyUser(session, successEmbed('Voicemove completato', lines.join('\n')));
   await tearDown(session);
-
-  try { if (guild.members.me.voice.channel) await guild.members.me.voice.disconnect('voicemove completato'); } catch (_) {}
 }
 
 async function onSessionTimeout(session) {
@@ -203,8 +217,10 @@ async function tearDown(session, { silent = false } = {}) {
 
   const guild = session.client.guilds.cache.get(session.guildId);
   if (!guild) return;
-  // Disconnette il bot se è ancora in vocale. Niente staging da pulire.
-  try { if (guild.members.me.voice.channel) await guild.members.me.voice.disconnect('voicemove pulizia'); } catch (_) {}
+  // Distruggi la connessione @discordjs/voice (la stessa API che abbiamo usato
+  // per entrare). Se il bot è in voce, viene disconnesso.
+  const conn = getVoiceConnection(session.guildId);
+  if (conn) conn.destroy();
 }
 
 async function notifyUser(session, embed) {
