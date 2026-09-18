@@ -110,7 +110,9 @@ function createSession(interaction, sessionId, sourceChannel) {
     voiceListener: null,
     isActive: true,
     // Snapshot dei membri attuali nel canale sorgente al momento dell'avvio.
-    // Quando il bot viene spostato, spostiamo esattamente questi utenti.
+    // Quando il bot viene spostato, spostiamo esattamente questi utenti
+    // (anche se nel frattempo alcuni sono usciti dal sourceChannel o si sono
+    // già mossi seguendo il bot nella destinazione).
     sourceMembers: Array.from(sourceChannel.members.filter((m) => !m.user.bot).keys()),
     introEmbed() {
       const { EmbedBuilder } = require('discord.js');
@@ -165,18 +167,29 @@ async function executeMove(session, destination) {
   const sourceChannel = guild.channels.cache.get(session.sourceChannelId);
   if (!sourceChannel) return tearDown(session, { silent: true });
 
-  // Prendi TUTTI i membri attuali nel canale sorgente (inclusi quelli entrati
-  // dopo l'avvio della sessione, purché non siano bot). Se sono usciti nel
-  // frattempo, la move fallirà con "not in voice" e li ignoriamo.
-  const memberIds = Array.from(sourceChannel.members.keys()).filter((id) => id !== session.botMemberId);
+  // Usa lo snapshot di sourceMembers catturato al /voicemove start: quegli ID
+  // sono le persone che il bot deve spostare. discord.js aggiorna la cache
+  // del canale in modo asincrono rispetto agli eventi, quindi rileggere
+  // sourceChannel.members qui può dare un set vuoto o parziale.
+  const memberIds = session.sourceMembers.filter((id) => id !== session.botMemberId);
   let moved = 0;
   let skipped = 0;
+  const failures = [];
 
   for (const memberId of memberIds) {
     try {
       const member = await guild.members.fetch(memberId).catch(() => null);
-      if (!member || !member.voice.channel || member.voice.channel.id !== session.sourceChannelId) {
-        // È uscito dal sorgente nel frattempo: skip silenzioso.
+      if (!member || !member.voice.channel) {
+        skipped += 1;
+        continue;
+      }
+      // Se il membro è già nella destinazione, conta come successo.
+      if (member.voice.channel.id === destination.id) {
+        moved += 1;
+        continue;
+      }
+      // Se è ancora nel sorgente, sposta. Se è uscito, skippa.
+      if (member.voice.channel.id !== session.sourceChannelId) {
         skipped += 1;
         continue;
       }
@@ -187,7 +200,7 @@ async function executeMove(session, destination) {
       await member.voice.setChannel(destination, `voicemove di ${session.userId}`);
       moved += 1;
     } catch (err) {
-      logger.warn({ err: err.message, user: memberId }, 'spostamento singolo voicemove fallito');
+      failures.push({ userId: memberId, reason: err.message });
       skipped += 1;
     }
   }
@@ -196,6 +209,9 @@ async function executeMove(session, destination) {
     `Spostati **${moved}/${memberIds.length}** membri in **${destination.name}**.`,
   ];
   if (skipped > 0) lines.push(`⚠️ ${skipped} non spostati (usciti dal canale o ruolo superiore al bot).`);
+  if (failures.length > 0 && failures.length <= 5) {
+    lines.push('Errori: ' + failures.map((f) => `<@${f.userId}>`).join(', '));
+  }
 
   await notifyUser(session, successEmbed('Voicemove completato', lines.join('\n')));
   await tearDown(session);
