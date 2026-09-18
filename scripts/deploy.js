@@ -43,11 +43,14 @@ function main() {
      cd ${REPO_DIR}
      echo '== git pull =='
      git pull --rebase --autostash
-     echo '== npm ci (package.json changed?) =='
-     if ! git diff HEAD@{1} HEAD -- package.json package-lock.json | grep -q .; then
-       echo 'nessuna modifica a package.json/lock, skip'
+     echo '== npm install (package.json changed?) =='
+     if ! git diff HEAD@{1} HEAD -- package.json | grep -q .; then
+       echo 'nessuna modifica a package.json, skip'
      else
-       docker exec ${CONTAINER} sh -c 'npm ci --omit=dev'
+       # /app/node_modules è un Docker volume separato, quindi installiamo
+       # dentro al container. Usiamo `npm install` (non `npm ci`) perché il
+       # package-lock.json non è bindato e può non essere sincronizzato.
+       docker exec ${CONTAINER} sh -c 'npm install --omit=dev --no-audit --no-fund'
      fi
      echo '== prisma db push =='
      docker exec ${CONTAINER} sh -c 'npx prisma db push'
