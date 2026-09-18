@@ -25,11 +25,15 @@ const tempChannelModule = require('../commands/voice/tempchannel');
 
 const OWNER_PREFIX = '👑 ';
 const pendingDeletes = new Map();
+// Protegge dal invio multiplo del pannello di controllo: anche se lo stesso
+// canale triggera Caso 3 più volte, il pannello arriva una volta sola.
+const panelSentFor = new Set();
 
 module.exports = {
   name: 'voiceStateUpdate',
   invalidateHubCache,
   liveSyncVoiceRoom,
+  clearPanelSent,
   async execute(oldState, newState) {
     const guild = newState.guild || oldState.guild;
     if (!guild) return;
@@ -43,7 +47,7 @@ module.exports = {
     // evitare di rifare la query ad ogni evento).
     const hubIds = await getHubIdsForGuild(guild.id);
 
-    // Caso 1: utente entra in un hub → crea temp voice.
+    // Caso 1: utente entra in un hub → crea temp voice (o riusa uno esistente).
     if (newState.channelId && hubIds.has(newState.channelId) && oldState.channelId !== newState.channelId) {
       const hubChannel = newState.guild.channels.cache.get(newState.channelId);
       await createTempVoice(guild, hubChannel?.parent, member, newState.channelId);
@@ -66,7 +70,13 @@ module.exports = {
         const temp = await repo.getTempChannel(channel.id);
         if (temp && temp.kind === 'voice') {
           await enforceBlockedAndLocked(channel, temp);
-          tempChannelModule.sendControlPanel(channel);
+          // Anti-doppio-pannello: se Caso 3 viene triggerato più volte per lo
+          // stesso canale (es. self-deaf toggle, riconnessioni), inviamo solo
+          // il primo. Si resetta quando il canale viene eliminato (channelDelete).
+          if (!panelSentFor.has(channel.id)) {
+            panelSentFor.add(channel.id);
+            tempChannelModule.sendControlPanel(channel);
+          }
         }
       }
     }
@@ -74,6 +84,11 @@ module.exports = {
   renameForNewOwner,
   OWNER_PREFIX,
 };
+
+function clearPanelSent(channelId) {
+  if (channelId) panelSentFor.delete(channelId);
+  else panelSentFor.clear();
+}
 
 // Cache locale degli hub per guild (TTL 30s). Evita di rifare la query su
 // ogni evento voiceStateUpdate.
@@ -110,6 +125,25 @@ async function enforceBlockedAndLocked(channel, temp) {
 
 async function createTempVoice(guild, parent, member, hubChannelId) {
   try {
+    // Prima di creare un nuovo canale, cerchiamo se l'owner ha già un temp
+    // voice attivo per lo stesso hub (riga su TempChannel la cui cache lato
+    // discord è ancora esistente). Se sì, spostiamo l'utente lì dentro e
+    // usciamo — niente nuovo canale, niente canale "orfano" che si svuota.
+    const ownerChannels = await repo.getTempChannelsByOwner(guild.id, member.id);
+    const existing = ownerChannels.find((t) => t.hub_channel_id === hubChannelId && t.kind === 'voice');
+    if (existing) {
+      const live = guild.channels.cache.get(existing.channel_id);
+      if (live) {
+        try {
+          await member.voice.setChannel(live, 'canale temp già esistente');
+          logger.info({ channel: live.id, owner: member.id, hub: hubChannelId }, 'owner riciclato su canale esistente');
+          return;
+        } catch (err) {
+          logger.warn({ err: err.message }, 'riciclo canale esistente fallito, ne creo uno nuovo');
+        }
+      }
+    }
+
     const defaultUserLimit = await settingsResolver.getSetting(guild.id, 'defaultUserLimit', config.features.tempChannels.defaultUserLimit);
 
     // Se l'owner ha già un VoiceRoom per questo hub, ripristiniamo le sue
