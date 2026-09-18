@@ -41,9 +41,22 @@ function listByCategory() {
       if (!cmd.data) continue;
       const cat = categoryFor(full);
       if (!grouped[cat]) grouped[cat] = [];
+
+      // Estrai i subcommand dal JSON del builder, se presenti.
+      let subs = [];
+      try {
+        const json = cmd.data.toJSON();
+        if (Array.isArray(json.options)) {
+          subs = json.options
+            .filter((o) => o.type === 1 /* SUB_COMMAND */)
+            .map((o) => ({ name: o.name, description: o.description || '' }));
+        }
+      } catch (_) {}
+
       grouped[cat].push({
         name: cmd.data.name,
         description: cmd.data.description || '',
+        subs,
       });
     }
   }

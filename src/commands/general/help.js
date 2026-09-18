@@ -21,7 +21,7 @@ async function execute(interaction) {
 
   if (category) {
     const entry = CATEGORIES[category];
-    const lines = (grouped[category] || []).map((c) => `\`/${c.name}\` — ${c.description}`);
+    const lines = (grouped[category] || []).map((c) => formatCommand(c));
     const embed = new EmbedBuilder()
       .setColor(0x5865f2)
       .setTitle(`${entry.emoji} ${entry.label}`)
@@ -35,20 +35,25 @@ async function execute(interaction) {
     const overview = Object.entries(CATEGORIES)
       .map(([key, { label, emoji }]) => {
         const count = (grouped[key] || []).length;
-        return `${emoji} **${label}** — ${count} comando${count === 1 ? '' : 'i'}`;
+        const subs = (grouped[key] || []).reduce((n, c) => n + (c.subs?.length || 0), 0);
+        return `${emoji} **${label}** — ${count} comando${count === 1 ? '' : 'i'}${subs ? `, ${subs} sub` : ''}`;
       })
       .join('\n');
     const embed = new EmbedBuilder()
       .setColor(0x5865f2)
       .setTitle('NextBot — Comandi')
-      .setDescription(overview + `\n\nUsa \`/help categoria:<nome>\` o \`/help tutto:true\` per i dettagli.`)
+      .setDescription(
+        overview +
+          `\n\nUsa \`/help categoria:<nome>\` per il dettaglio di una categoria, ` +
+          `oppure \`/help tutto:true\` per l'elenco completo.`
+      )
       .setFooter({ text: `${total} comandi totali` })
       .setTimestamp();
     return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
   }
 
   const pages = Object.entries(CATEGORIES).map(([key, { label, emoji }]) => {
-    const lines = (grouped[key] || []).map((c) => `\`/${c.name}\` — ${c.description}`);
+    const lines = (grouped[key] || []).map((c) => formatCommand(c));
     return new EmbedBuilder()
       .setColor(0x5865f2)
       .setTitle(`${emoji} ${label}`)
@@ -56,6 +61,13 @@ async function execute(interaction) {
       .setFooter({ text: `${total} comandi totali` });
   });
   await interaction.reply({ embeds: pages, flags: MessageFlags.Ephemeral });
+}
+
+function formatCommand(cmd) {
+  const head = `\`/${cmd.name}\` — ${cmd.description}`;
+  if (!cmd.subs || cmd.subs.length === 0) return head;
+  const subLines = cmd.subs.map((s) => `  • \`/${cmd.name} ${s.name}\` — ${s.description}`);
+  return [head, ...subLines].join('\n');
 }
 
 module.exports = { data, execute };

@@ -19,6 +19,121 @@ Commands are grouped by category:
 - **🎉 Autorole + Welcome** — automatic role on join, configurable welcome message
 - **Hot-standby failover** — two nodes share a Redis lock; only the leader connects to Discord
 
+## Comandi
+
+Lista completa dei comandi slash. Per l'elenco aggiornato a runtime usa `/help tutto:true`.
+
+### 🛡️ Moderazione — `/mod`
+| Subcommand | Descrizione |
+| --- | --- |
+| `ban <utente> [motivo] [durata] [giorni_messaggi]` | Banna un utente (temporaneo opzionale, 0-7gg di messaggi) |
+| `kick <utente> [motivo]` | Espelli un utente |
+| `mute <utente> <durata> [motivo]` | Silenzia un utente (es. `10m`, `1h`, `1d`) |
+| `unmute <utente>` | Rimuovi il timeout da un utente |
+| `warn <utente> <motivo>` | Registra un avviso |
+| `warnings <utente>` | Mostra gli avvisi di un utente |
+| `clearwarns <utente>` | Cancella gli avvisi di un utente |
+| `purge <quantità> [utente]` | Elimina in blocco 1-100 messaggi (opz. solo di un utente) |
+| `slowmode <secondi>` | Imposta modalità lenta (0-21600s) sul canale attuale |
+| `lock` / `unlock [canale]` | Blocca/sblocca un canale (default: attuale) |
+
+### 🎫 Ticket — `/ticket`
+| Subcommand | Descrizione |
+| --- | --- |
+| `open` | Apri un nuovo ticket (form con oggetto + descrizione) |
+| `panel [canale]` | Invia il pannello con il bottone "Apri un ticket" |
+| `close` | Chiudi il ticket attuale (con conferma) |
+| `add <utente>` | Aggiungi un utente al ticket |
+| `remove <utente>` | Rimuovi un utente dal ticket (solo staff) |
+| `claim` | Prendi in carico il ticket |
+| `transcript` | Salva e invia la trascrizione del ticket |
+
+### 📈 Livelli — `/level`
+| Subcommand | Descrizione |
+| --- | --- |
+| `rank [utente]` | Mostra la card del livello |
+| `leaderboard` | Classifica XP del server |
+| `set <livello> <utente>` | Imposta un livello (solo staff) |
+| `add <xp> <utente>` | Aggiungi XP (solo staff) |
+| `reset <utente>` | Azzera XP/level (solo staff) |
+
+### 💰 Economia — `/economy`
+| Subcommand | Descrizione |
+| --- | --- |
+| `balance [utente]` | Controlla il saldo |
+| `daily` | Riscuoti la ricompensa giornaliera (cooldown 22h, streak con bonus) |
+| `work` | Lavora per guadagnare monete (cooldown 1h) |
+| `deposit <importo>` | Sposta dal portafoglio alla banca |
+| `withdraw <importo>` | Sposta dalla banca al portafoglio |
+| `give <utente> <importo>` | Dai monete a un utente |
+| `rob <utente>` | Prova a derubare (40% successo, multa 50 se scoperti) |
+| `leaderboard` | Classifica portafoglio + banca |
+
+### 🎲 Giochi — `/blackjack`, `/poker`
+**Blackjack**
+| Subcommand | Descrizione |
+| --- | --- |
+| `start <puntata>` | Inizia una nuova partita |
+| `hit` / `stand` / `double` | Azioni di gioco (anche via bottoni) |
+
+**Poker (Texas Hold'em multiplayer)**
+| Subcommand | Descrizione |
+| --- | --- |
+| `create <buyIn>` | Crea un tavolo |
+| `join <buyIn>` | Siedi al tavolo del canale |
+| `leave` | Esci dal tavolo (solo in lobby) |
+| `start` | L'host avvia la mano |
+| `call` / `check` / `fold` / `raise <importo>` | Azioni di gioco |
+| `state` | Stato del tavolo |
+| `end` | Chiudi il tavolo e rimborsa |
+
+### 🔊 Voce — `/voice`, `/voicemove`, `vkick` (context menu)
+**`/voice` — gestione canale temporaneo (devi essere owner)**
+| Subcommand | Descrizione |
+| --- | --- |
+| `create <nome> [minuti]` | Crea canale testuale temporaneo (legacy staff) |
+| `rename <nome>` | Rinomina il tuo canale |
+| `lock` / `unlock` | Blocca/sblocca join al tuo canale |
+| `limit <numero>` | Imposta limite utenti (0=illimitato) |
+| `kick <utente>` | Caccia un membro (autocomplete membri del canale) |
+| `permit <utente>` | Riammetti un utente precedentemente bloccato |
+| `transfer <utente>` | Trasferisci la proprietà (autocomplete membri del canale) |
+| `claim` | Rivendica un canale orfano |
+| `info` | Mostra la configurazione del tuo canale |
+
+**`/voicemove` — sposta tutti i membri**
+| Subcommand | Descrizione |
+| --- | --- |
+| `start` | Entra nel tuo canale, trascina il bot nel canale di destinazione |
+| `cancel` | Annulla la sessione attiva |
+
+**Context menu `vkick`** — tasto destro su un membro → Apps → VKick. Caccia il membro dal tuo canale.
+
+### 🎵 Soundboard — `/soundboard`
+| Subcommand | Descrizione |
+| --- | --- |
+| `add <nome> <file>` | Aggiungi un suono (carica un file audio) |
+| `play <nome>` | Riproduci nel tuo canale vocale (cooldown 60s, autocomplete) |
+| `list` | Elenco suoni |
+| `delete <nome>` | Elimina un tuo suono (autocomplete) |
+| `rename <vecchio> <nuovo>` | Rinomina (autocomplete) |
+| `stop` | Ferma la riproduzione ed esci dal canale |
+
+### 🎉 Divertimento — `/fun`
+| Subcommand | Descrizione |
+| --- | --- |
+| `8ball <domanda>` | Palla magica |
+| `coinflip` | Testa o croce |
+| `dice <facce>` | Lancia un dado |
+| `rps <scelta>` | Sasso, carta, forbice |
+| `choose <opzioni>` | Scegli tra opzioni separate da virgole |
+| `rate <cosa>` | Vota qualcosa da 1 a 10 |
+
+### ⚙️ Generale — `/help`, `/settings`, `/admin`
+- **`/help [categoria] [tutto]`** — Lista comandi raggruppati per categoria
+- **`/settings <categoria> <azione>`** — Pannello per modificare la config del guild (autorole, ticket category, livelli, voice hub, cooldown, …). I tunable globali restano in `config.json`.
+- **`/admin <azione>`** — Comandi admin: setup hub ticket/voice, deploy/wipe comandi Discord.
+
 ## Quick start (no Docker, no Redis)
 
 ```bash
