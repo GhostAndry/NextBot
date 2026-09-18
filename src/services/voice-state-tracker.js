@@ -65,6 +65,13 @@ function listByHub(guildId, hubChannelId) {
   return out;
 }
 
+// Rimuove tutte le entry di un guild (per cleanup su guildDelete).
+function purgeGuild(guildId) {
+  for (const [k, entry] of cache) {
+    if (entry.guildId === guildId) cache.delete(k);
+  }
+}
+
 async function syncFromDatabase(client) {
   // Legge tutti i temp channel attuali e li inserisce in cache.
   // Chiamato all'avvio del bot per partire con lo stato corretto.
@@ -90,5 +97,6 @@ module.exports = {
   list,
   listByHub,
   syncFromDatabase,
+  purgeGuild,
   key,
 };
