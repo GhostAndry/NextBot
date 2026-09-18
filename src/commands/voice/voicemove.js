@@ -17,23 +17,14 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 
 const data = new SlashCommandBuilder()
   .setName('voicemove')
-  .setDescription('Sposta tutti dal tuo canale vocale a un altro tramite il bot')
-  .addSubcommand((sc) => sc.setName('start').setDescription('Avvia una sessione di voicemove'))
-  .addSubcommand((sc) => sc.setName('cancel').setDescription('Annulla la sessione attiva'))
+  .setDescription('Sposta tutti i membri del tuo canale vocale nella destinazione che scegli')
   .setDefaultMemberPermissions(PermissionFlagsBits.MoveMembers);
 
 // --- Dispatcher -----------------------------------------------------------
 
 async function execute(interaction) {
-  const handler = SUBCOMMAND_HANDLERS[interaction.options.getSubcommand()];
-  if (!handler) return error(interaction, 'Sottocomando sconosciuto.');
-  return handler(interaction);
+  return startSession(interaction);
 }
-
-const SUBCOMMAND_HANDLERS = {
-  start: startSession,
-  cancel: cancelSession,
-};
 
 // --- Sottocomandi ---------------------------------------------------------
 
@@ -47,7 +38,7 @@ async function startSession(interaction) {
   const sourceChannel = voice.channel;
   const me = interaction.guild.members.me;
 
-  // Permessi necessari sia sul sorgente sia sulla categoria (per staging).
+  // Permessi necessari: bot può vedere/entrare nel canale sorgente e può spostare.
   const srcPerms = sourceChannel.permissionsFor(me);
   if (!srcPerms?.has(PermissionFlagsBits.Connect)) {
     return error(interaction, 'Non posso entrare nel tuo canale.');
@@ -58,33 +49,21 @@ async function startSession(interaction) {
   if (!me.permissions.has(PermissionFlagsBits.MoveMembers)) {
     return error(interaction, 'Mi serve il permesso "Sposta membri".');
   }
-  // Sanity check: i membri sorgenti devono essere movibili dal bot (ruoli).
-  const nonMovable = sourceChannel.members.filter((m) => !m.user.bot && !m.movable).size;
-  if (nonMovable > 0) {
-    return error(interaction, `${nonMovable} membro/i non movibili nel canale (ruolo superiore al bot).`);
-  }
 
   const sessionId = makeSessionId(interaction);
-  if (sessions.has(sessionId)) return error(interaction, 'Hai già una sessione attiva. Annullala prima.');
+  if (sessions.has(sessionId)) return error(interaction, 'Hai già una sessione attiva. /voicemove per annullare.');
 
-  // Defer la reply prima di iniziare lavoro pesante: se la creazione dello
-  // staging fallisce dopo 3s, l'utente vede un messaggio di errore invece di
-  // "Unknown interaction".
+  // Defer: l'azione di entrare nel canale potrebbe richiedere >3s su guild grandi.
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  const stagingChannel = await createStagingChannel(interaction.guild, sourceChannel);
-  if (!stagingChannel) {
-    return interaction.editReply({ embeds: [errorEmbed('Errore', 'Impossibile creare il canale di appoggio. Controlla i permessi del bot.')] });
-  }
-
+  // Entra nel canale sorgente.
   try {
-    await me.voice.setChannel(sourceChannel, 'voicemove: unisciti alla sorgente');
+    await me.voice.setChannel(sourceChannel, 'voicemove: pronto a spostare');
   } catch (err) {
-    await stagingChannel.delete('voicemove: join fallito').catch(() => {});
     return interaction.editReply({ embeds: [errorEmbed('Errore', `Impossibile entrare nel tuo canale: ${err.message}`)] });
   }
 
-  const session = createSession(interaction, sessionId, sourceChannel, stagingChannel);
+  const session = createSession(interaction, sessionId, sourceChannel);
   sessions.set(sessionId, session);
 
   await interaction.editReply({ embeds: [session.introEmbed()] });
@@ -102,19 +81,21 @@ async function cancelSession(interaction) {
 
 // --- Ciclo di vita della sessione -----------------------------------------
 
-function createSession(interaction, sessionId, sourceChannel, stagingChannel) {
+function createSession(interaction, sessionId, sourceChannel) {
   return {
     id: sessionId,
     guildId: interaction.guildId,
     userId: interaction.user.id,
     client: interaction.client,
     sourceChannelId: sourceChannel.id,
-    stagingChannelId: stagingChannel.id,
     botMemberId: interaction.guild.members.me.id,
     timeoutMs: config.features.voicemove.autoLeaveMs || DEFAULT_TIMEOUT_MS,
     timeoutHandle: null,
     voiceListener: null,
     isActive: true,
+    // Snapshot dei membri attuali nel canale sorgente al momento dell'avvio.
+    // Quando il bot viene spostato, spostiamo esattamente questi utenti.
+    sourceMembers: Array.from(sourceChannel.members.filter((m) => !m.user.bot).keys()),
     introEmbed() {
       const { EmbedBuilder } = require('discord.js');
       return new EmbedBuilder()
@@ -123,9 +104,9 @@ function createSession(interaction, sessionId, sourceChannel, stagingChannel) {
         .setDescription([
           `Sono entrato in **${sourceChannel.name}**.`,
           `Trascinami (il bot) nel canale di destinazione.`,
-          `Tutti quelli in **${sourceChannel.name}** verranno spostati lì.`,
+          `Quando mi sposti, tutti i membri presenti in **${sourceChannel.name}** verranno spostati lì.`,
           `Esco automaticamente dopo ${Math.round(this.timeoutMs / 1000)}s di inattività.`,
-          `Annulla con \`/voicemove cancel\`.`,
+          `Rifai \`/voicemove\` per annullare.`,
         ].join('\n'))
         .setFooter({ text: `Sessione di ${interaction.user.tag}` })
         .setTimestamp();
@@ -141,68 +122,64 @@ function registerSessionListeners(session) {
 
 function onVoiceStateUpdate(session, oldState, newState) {
   if (oldState.id !== session.botMemberId) return;
-
-  // Non processare se la sessione è già stata chiusa
   if (!session.isActive) return;
 
-  // Reazioni a:
-  //   - il bot viene mosso FUORI dal canale sorgente in un altro canale utente
-  //   - il bot viene disconnesso completamente (channelId = null)
+  // Trigger: il bot è stato mosso FUORI dal canale sorgente verso un altro canale
+  // (utente lo trascina) o disconnesso del tutto.
   const wasInSource = oldState.channelId === session.sourceChannelId;
-  const wasInStaging = oldState.channelId === session.stagingChannelId;
-  const wentToUserChannel = newState.channelId && newState.channelId !== session.stagingChannelId;
-  const disconnected = !newState.channelId;
+  if (!wasInSource) return;
 
-  if (!wasInSource && !wasInStaging) return;
-  if (!wentToUserChannel && !disconnected) return;
+  if (!newState.channelId) {
+    // Bot disconnesso: tear down silenzioso.
+    tearDown(session, { silent: true }).catch(() => {});
+    return;
+  }
 
-  const destination = disconnected ? null : newState.guild.channels.cache.get(newState.channelId);
-  // Ignora se la destinazione è uguale al source (movimento nullo)
-  if (destination && destination.id === session.sourceChannelId) return;
+  const destination = newState.guild.channels.cache.get(newState.channelId);
+  if (!destination) return;
+  if (destination.id === session.sourceChannelId) return; // spostato nello stesso canale, ignora
 
   executeMove(session, destination).catch((err) => logger.error({ err }, 'spostamento voicemove fallito'));
 }
 
 async function executeMove(session, destination) {
   if (!session.isActive) return;
-  if (!destination) {
-    // Bot disconnesso: tear down senza error.
-    return tearDown(session, { silent: true });
-  }
-
   const guild = session.client.guilds.cache.get(session.guildId);
   if (!guild) return tearDown(session, { silent: true });
   const sourceChannel = guild.channels.cache.get(session.sourceChannelId);
   if (!sourceChannel) return tearDown(session, { silent: true });
 
-  // Elimina lo staging: il bot è già partito, lo staging non serve più.
-  const staging = guild.channels.cache.get(session.stagingChannelId);
-  if (staging?.deletable) staging.delete('voicemove: usato').catch(() => {});
-
-  // Filtra i membri del sorgente (escludi bot e membri non più nel canale).
-  const members = sourceChannel.members.filter((m) => !m.user.bot && m.movable);
+  // Prendi TUTTI i membri attuali nel canale sorgente (inclusi quelli entrati
+  // dopo l'avvio della sessione, purché non siano bot). Se sono usciti nel
+  // frattempo, la move fallirà con "not in voice" e li ignoriamo.
+  const memberIds = Array.from(sourceChannel.members.keys()).filter((id) => id !== session.botMemberId);
   let moved = 0;
   let skipped = 0;
-  const failures = [];
 
-  for (const [, member] of members) {
+  for (const memberId of memberIds) {
     try {
+      const member = await guild.members.fetch(memberId).catch(() => null);
+      if (!member || !member.voice.channel || member.voice.channel.id !== session.sourceChannelId) {
+        // È uscito dal sorgente nel frattempo: skip silenzioso.
+        skipped += 1;
+        continue;
+      }
+      if (!member.movable) {
+        skipped += 1;
+        continue;
+      }
       await member.voice.setChannel(destination, `voicemove di ${session.userId}`);
       moved += 1;
     } catch (err) {
-      // Discord API errors: ruolo troppo alto, channel pieno, ecc.
-      failures.push({ userId: member.id, reason: err.message });
+      logger.warn({ err: err.message, user: memberId }, 'spostamento singolo voicemove fallito');
       skipped += 1;
     }
   }
 
   const lines = [
-    `Spostati **${moved}/${members.size}** membri in **${destination.name}**.`,
+    `Spostati **${moved}/${memberIds.length}** membri in **${destination.name}**.`,
   ];
-  if (skipped > 0) lines.push(`❌ ${skipped} non movibili (ruolo superiore al bot o errore API).`);
-  if (failures.length > 0 && failures.length <= 5) {
-    lines.push('Errori: ' + failures.map((f) => `<@${f.userId}>`).join(', '));
-  }
+  if (skipped > 0) lines.push(`⚠️ ${skipped} non spostati (usciti dal canale o ruolo superiore al bot).`);
 
   await notifyUser(session, successEmbed('Voicemove completato', lines.join('\n')));
   await tearDown(session);
@@ -226,10 +203,7 @@ async function tearDown(session, { silent = false } = {}) {
 
   const guild = session.client.guilds.cache.get(session.guildId);
   if (!guild) return;
-  if (!silent) {
-    const staging = guild.channels.cache.get(session.stagingChannelId);
-    if (staging?.deletable) staging.delete('voicemove pulizia').catch(() => {});
-  }
+  // Disconnette il bot se è ancora in vocale. Niente staging da pulire.
   try { if (guild.members.me.voice.channel) await guild.members.me.voice.disconnect('voicemove pulizia'); } catch (_) {}
 }
 
@@ -270,43 +244,6 @@ function purgeMember(guildId, userId) {
 
 function makeSessionId(interaction) {
   return `${interaction.guildId}:${interaction.user.id}`;
-}
-
-async function createStagingChannel(guild, sourceChannel) {
-  try {
-    const me = guild.members.me;
-    // Permesso di base: nessuno vede lo staging tranne il bot e il source owner.
-    // La copia dei permissionOverwrites del source è comoda ma pericolosa:
-    // meglio partire con un set minimo e aggiungere solo i permessi minimi
-    // richiesti (Connect + ViewChannel per il source owner).
-    const baseOverwrites = [
-      {
-        id: guild.id,
-        deny: [PermissionFlagsBits.ViewChannel],
-      },
-      {
-        id: me.id,
-        allow: [
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.Connect,
-          PermissionFlagsBits.Speak,
-          PermissionFlagsBits.MoveMembers,
-          PermissionFlagsBits.ManageChannels,
-        ],
-      },
-    ];
-
-    return await guild.channels.create({
-      name: 'voicemove-destinazione',
-      type: 2,
-      parent: sourceChannel.parent,
-      permissionOverwrites: baseOverwrites,
-      reason: 'voicemove staging',
-    });
-  } catch (err) {
-    logger.error({ err }, 'creazione canale di appoggio fallita');
-    return null;
-  }
 }
 
 function disabled(interaction) {
