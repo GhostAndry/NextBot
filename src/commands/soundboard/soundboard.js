@@ -25,11 +25,11 @@ function ensureStorageDir() {
 const data = new SlashCommandBuilder()
   .setName('soundboard')
   .setDescription('Comandi soundboard')
-  .addSubcommand((sc) => sc.setName('add').setDescription('Aggiungi un suono (allega un file audio)').addStringOption((o) => o.setName('nome').setDescription('Nome del suono').setRequired(true)).addAttachmentOption((o) => o.setName('file').setDescription('File audio').setRequired(true)))
-  .addSubcommand((sc) => sc.setName('play').setDescription('Riproduci un suono nel tuo canale vocale').addStringOption((o) => o.setName('nome').setDescription('Nome del suono').setRequired(true)))
+  .addSubcommand((sc) => sc.setName('add').setDescription('Aggiungi un suono (allega un file audio)').addStringOption((o) => o.setName('nome').setDescription('Nome del suono').setRequired(true).setAutocomplete(true)).addAttachmentOption((o) => o.setName('file').setDescription('File audio').setRequired(true)))
+  .addSubcommand((sc) => sc.setName('play').setDescription('Riproduci un suono nel tuo canale vocale').addStringOption((o) => o.setName('nome').setDescription('Nome del suono').setRequired(true).setAutocomplete(true)))
   .addSubcommand((sc) => sc.setName('list').setDescription('Elenco suoni'))
-  .addSubcommand((sc) => sc.setName('delete').setDescription('Elimina un suono').addStringOption((o) => o.setName('nome').setDescription('Nome del suono').setRequired(true)))
-  .addSubcommand((sc) => sc.setName('rename').setDescription('Rinomina un suono').addStringOption((o) => o.setName('vecchio_nome').setDescription('Nome attuale').setRequired(true)).addStringOption((o) => o.setName('nuovo_nome').setDescription('Nuovo nome').setRequired(true)))
+  .addSubcommand((sc) => sc.setName('delete').setDescription('Elimina un suono').addStringOption((o) => o.setName('nome').setDescription('Nome del suono').setRequired(true).setAutocomplete(true)))
+  .addSubcommand((sc) => sc.setName('rename').setDescription('Rinomina un suono').addStringOption((o) => o.setName('vecchio_nome').setDescription('Nome attuale').setRequired(true).setAutocomplete(true)).addStringOption((o) => o.setName('nuovo_nome').setDescription('Nuovo nome').setRequired(true)))
   .addSubcommand((sc) => sc.setName('stop').setDescription('Ferma la riproduzione ed esci dal canale vocale'));
 
 // --- Dispatcher -----------------------------------------------------------
@@ -39,6 +39,18 @@ async function execute(interaction) {
   const handler = SUBCOMMAND_HANDLERS[interaction.options.getSubcommand()];
   if (!handler) return error(interaction, 'Sottocomando sconosciuto.');
   return handler(interaction);
+}
+
+async function autocomplete(interaction) {
+  if (!config.features.soundboards.enabled) return interaction.respond([]);
+  const focused = interaction.options.getFocused(true);
+  if (focused.name !== 'nome' && focused.name !== 'vecchio_nome') {
+    return interaction.respond([]);
+  }
+  const matches = await repo.searchSoundboards(interaction.guildId, focused.value, 25);
+  return interaction.respond(
+    matches.map((s) => ({ name: s.name, value: s.name }))
+  );
 }
 
 const SUBCOMMAND_HANDLERS = {
@@ -174,4 +186,4 @@ function error(interaction, msg) {
   return interaction.reply({ embeds: [errorEmbed('Errore', msg)], flags: MessageFlags.Ephemeral });
 }
 
-module.exports = { data, execute };
+module.exports = { data, execute, autocomplete };

@@ -495,6 +495,21 @@ async function listSoundboards(guildId, limit = 25) {
   return mapRows(rows);
 }
 
+async function searchSoundboards(guildId, prefix, limit = 25) {
+  // SQLite non supporta `mode: 'insensitive'`, filtriamo in memoria sul campo
+  // denormalizzato `nameLower`. Buona approssimazione: l'utente digita in
+  // lowercase (l'app normalizza i nomi in fase di salvataggio).
+  const needle = (prefix || '').toLowerCase();
+  const all = await prisma.soundboard.findMany({
+    where: { guildId },
+    orderBy: [{ plays: 'desc' }, { createdAt: 'desc' }],
+    take: 200,
+  });
+  return mapRows(all)
+    .filter((r) => r.name.toLowerCase().startsWith(needle))
+    .slice(0, limit);
+}
+
 async function deleteSoundboard(guildId, name) {
   return prisma.soundboard.deleteMany({
     where: { guildId, nameLower: name.toLowerCase() },
@@ -760,7 +775,7 @@ module.exports = {
   saveVoiceRoom, getVoiceRoom, listVoiceRoomsByHub, deleteVoiceRoom,
   addVoiceHub, removeVoiceHub, removeVoiceHubById, getVoiceHubByChannel,
   getVoiceHubById, listVoiceHubs, setDefaultVoiceHub, renameVoiceHub, getHubChannelIds,
-  createSoundboard, getSoundboard, listSoundboards, deleteSoundboard, incrementSoundboardPlays, renameSoundboard,
+  createSoundboard, getSoundboard, listSoundboards, searchSoundboards, deleteSoundboard, incrementSoundboardPlays, renameSoundboard,
   saveGameSession, getGameSession, deleteGameSession,
   saveBlackjackSession, getBlackjackSession, deleteBlackjackSession,
   createPokerTable, getPokerTableByChannel, updatePokerTable, deletePokerTable,
