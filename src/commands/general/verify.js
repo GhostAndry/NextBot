@@ -65,7 +65,7 @@ function buildNumberChallenge() {
         new ButtonBuilder()
           .setCustomId(`verify:captcha:placeholder:${n}:0`)
           .setLabel(String(n))
-          .setStyle(n === correct ? ButtonStyle.Success : ButtonStyle.Secondary),
+          .setStyle(ButtonStyle.Secondary),
       );
     }
     rows.push(row);
@@ -92,7 +92,7 @@ function buildEmojiChallenge() {
         new ButtonBuilder()
           .setCustomId(`verify:captcha:placeholder:${poolIdx}:0`)
           .setEmoji(emoji)
-          .setStyle(poolIdx === correctIdx ? ButtonStyle.Success : ButtonStyle.Secondary),
+          .setStyle(ButtonStyle.Secondary),
       );
     }
     rows.push(row);
@@ -173,8 +173,8 @@ async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass 
   }
 
   const prompt = ch.kind === 'num'
-    ? `Clicca il numero **${ch.correct}**. Hai 2 minuti. (I bottoni verdi sono quelli giusti: ignorali e scegli tu.)`
-    : `Clicca l'emoji **${ch.correctEmoji}**. Hai 2 minuti. (I bottoni verdi sono quelli giusti: ignorali e scegli tu.)`;
+    ? `Clicca il numero **${ch.correct}**. Hai 2 minuti.`
+    : `Clicca l'emoji **${ch.correctEmoji}**. Hai 2 minuti.`;
 
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
