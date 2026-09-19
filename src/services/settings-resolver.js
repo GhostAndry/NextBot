@@ -51,6 +51,7 @@ const KNOWN_SETTINGS = {
   // Autorole / welcome
   autoroleEnabled: { label: 'Autorole al join attivo', type: 'bool' },
   welcomeEnabled: { label: 'Messaggio di benvenuto attivo', type: 'bool' },
+  verifyEnabled: { label: 'Sistema di verifica attivo', type: 'bool' },
 };
 
 function isKnownKey(key) {

@@ -4,6 +4,7 @@ const { SlashCommandBuilder, PermissionFlagsBits, ChannelType, EmbedBuilder, Mes
 const repo = require('../../db/repo');
 const settingsResolver = require('../../services/settings-resolver');
 const { successEmbed, errorEmbed } = require('../../utils/helpers');
+const logger = require('../../utils/logger');
 
 // /settings è il pannello unico per modificare TUTTO ciò che è salvato nel DB.
 // Le opzioni globali restano in config.json (richiedono un restart e non sono
@@ -13,6 +14,7 @@ const { successEmbed, errorEmbed } = require('../../utils/helpers');
 // Subcommand groups:
 //   show       - mostra la config corrente (tutta o una sezione)
 //   autorole   - imposta/disattiva l'autorole al join
+//   verify     - imposta/disattiva il ruolo "verificato" per /verify
 //   welcome    - imposta/disattiva il canale + messaggio di benvenuto
 //   ticket     - categoria, log, max per user, transcript
 //   voice      - hub vocale, auto-delete, user limit
@@ -27,6 +29,7 @@ const data = new SlashCommandBuilder()
     .addStringOption((o) => o.setName('sezione').setDescription('Sezione specifica').setRequired(false)
       .addChoices(
         { name: 'Autorole & benvenuto', value: 'welcome' },
+        { name: 'Verifica', value: 'verify' },
         { name: 'Ticket', value: 'ticket' },
         { name: 'Canali temporanei', value: 'voice' },
         { name: 'Moderazione', value: 'mod' },
@@ -38,6 +41,10 @@ const data = new SlashCommandBuilder()
     .addSubcommand((sc) => sc.setName('set').setDescription('Imposta il ruolo assegnato al join').addRoleOption((o) => o.setName('ruolo').setDescription('Ruolo da assegnare').setRequired(true)))
     .addSubcommand((sc) => sc.setName('disable').setDescription('Disattiva l\'autorole'))
     .addSubcommand((sc) => sc.setName('toggle').setDescription('Attiva/disattiva senza rimuovere il ruolo').addBooleanOption((o) => o.setName('attivo').setDescription('true per attivare, false per disattivare').setRequired(true))),
+  )
+  .addSubcommandGroup((group) => group.setName('verify').setDescription('Sistema di verifica al join')
+    .addSubcommand((sc) => sc.setName('role').setDescription('Imposta il ruolo "verificato"').addRoleOption((o) => o.setName('ruolo').setDescription('Ruolo da assegnare dopo la verifica').setRequired(true)))
+    .addSubcommand((sc) => sc.setName('disable').setDescription('Disattiva la verifica (rimuovi ruolo)')),
   )
   .addSubcommandGroup((group) => group.setName('welcome').setDescription('Messaggio di benvenuto')
     .addSubcommand((sc) => sc.setName('channel').setDescription('Imposta il canale dove inviare il benvenuto').addChannelOption((o) => o.setName('canale').setDescription('Canale testuale').addChannelTypes(ChannelType.GuildText).setRequired(true)))
@@ -118,6 +125,8 @@ const HANDLERS = {
   'autorole:set': autoroleSet,
   'autorole:disable': autoroleDisable,
   'autorole:toggle': autoroleToggle,
+  'verify:role': verifyRole,
+  'verify:disable': verifyDisable,
   'welcome:channel': welcomeChannel,
   'welcome:message': welcomeMessage,
   'welcome:toggle': welcomeToggle,
@@ -156,6 +165,7 @@ async function cmdShow(interaction) {
 
   const sections = {
     welcome: () => showWelcome(interaction, cfg, settings),
+    verify: () => showVerify(interaction, cfg, settings),
     ticket: () => showTicket(interaction, cfg, settings),
     voice: () => showVoice(interaction, cfg, settings),
     mod: () => showMod(interaction, cfg, settings),
@@ -178,6 +188,7 @@ async function showAll(interaction, cfg, settings) {
     'Usa `/settings show sezione:<nome>` per il dettaglio di una singola area.',
     '',
     `🎉 **Autorole & benvenuto** — ruolo: ${fmtRole(cfg.auto_role_id)}, canale welcome: ${fmtChannel(interaction, cfg.welcome_channel_id)}`,
+    `✅ **Verifica** — ruolo: ${fmtRole(cfg.verified_role_id)}`,
     `🎫 **Ticket** — categoria: ${fmtChannel(interaction, cfg.ticket_category_id)}, log: ${fmtChannel(interaction, cfg.ticket_log_channel_id)}`,
     `🔊 **Voce** — ${hubLine}`,
     `🛡️ **Moderazione** — log: ${fmtChannel(interaction, cfg.mod_log_channel_id)}, mute role: ${fmtRole(cfg.mute_role_id)}`,
@@ -195,6 +206,15 @@ function showWelcome(interaction, cfg, settings) {
       { name: 'Canale benvenuto', value: fmtChannel(interaction, cfg.welcome_channel_id), inline: true },
       { name: 'Benvenuto attivo', value: fmtBool(settings.welcomeEnabled, false), inline: true },
       { name: 'Messaggio', value: cfg.welcome_message ? `\`${cfg.welcome_message}\`` : '_non impostato_' },
+    ).setTimestamp();
+}
+
+function showVerify(interaction, cfg, settings) {
+  return new EmbedBuilder().setColor(0x5865f2).setTitle('✅ Verifica')
+    .addFields(
+      { name: 'Ruolo verificato', value: fmtRole(cfg.verified_role_id), inline: true },
+      { name: 'Verifica attiva', value: fmtBool(settings.verifyEnabled, false), inline: true },
+      { name: 'Comando', value: '`/verify` apre un captcha effimero (numero 1-15 o emoji) per ottenere il ruolo.' },
     ).setTimestamp();
 }
 
@@ -285,6 +305,38 @@ async function autoroleToggle(interaction) {
   const active = interaction.options.getBoolean('attivo');
   await settingsResolver.setSetting(interaction.guildId, 'autoroleEnabled', active);
   await interaction.reply({ embeds: [successEmbed('Autorole', active ? 'attivato.' : 'disattivato.')], flags: MessageFlags.Ephemeral });
+}
+
+// --- verify ----------------------------------------------------------------
+
+async function verifyRole(interaction) {
+  const role = interaction.options.getRole('ruolo');
+  if (role.managed) return error(interaction, 'Non puoi usare un ruolo gestito da un\'integrazione.');
+  if (role.id === interaction.guildId) return error(interaction, 'Non puoi usare @everyone.');
+
+  await repo.setGuildConfig(interaction.guildId, { verified_role_id: role.id });
+  await settingsResolver.setSetting(interaction.guildId, 'verifyEnabled', true);
+
+  // Applica retroattivamente il gating sui canali temp voice già esistenti.
+  const voiceEvt = require('../../events/voiceStateUpdate');
+  const result = await voiceEvt.enforceVerifiedVisibilityForGuild(interaction.guild, role.id).catch((err) => {
+    logger.warn({ err: err.message, guild: interaction.guildId }, 'enforce verify retroattivo fallito');
+    return null;
+  });
+
+  await interaction.reply({
+    embeds: [successEmbed(
+      'Verifica attivata',
+      `${role} sarà assegnato agli utenti che completano \`/verify\`. I canali vocali temporanei esistenti sono stati aggiornati: ora visibili solo ai verificati (i non verificati attualmente in voce sono stati rimossi).`,
+    )],
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function verifyDisable(interaction) {
+  await repo.setGuildConfig(interaction.guildId, { verified_role_id: null });
+  await settingsResolver.setSetting(interaction.guildId, 'verifyEnabled', false);
+  await interaction.reply({ embeds: [successEmbed('Verifica disattivata', 'Sistema di verifica rimosso. I vocali temporanei tornano accessibili a tutti.')], flags: MessageFlags.Ephemeral });
 }
 
 // --- welcome ---------------------------------------------------------------

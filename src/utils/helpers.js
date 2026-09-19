@@ -24,6 +24,16 @@ function hasElevatedPermissions(member) {
   );
 }
 
+// True se il member possiede il ruolo "verificato" configurato per la guild.
+// Se il ruolo non è configurato, il sistema di verifica è considerato
+// disattivato e l'utente è implicitamente "verificato" (no gating).
+function isVerified(member, verifiedRoleId) {
+  if (!member) return false;
+  if (!verifiedRoleId) return true;
+  if (member.roles?.cache?.has?.(verifiedRoleId)) return true;
+  return false;
+}
+
 function modEmbed(action, target, mod, reason, extra = {}) {
   const e = new EmbedBuilder()
     .setColor(0xed4245)
@@ -115,6 +125,7 @@ async function deferEphemeral(interaction) {
 module.exports = {
   hasPermission,
   hasElevatedPermissions,
+  isVerified,
   modEmbed,
   infoEmbed,
   successEmbed,

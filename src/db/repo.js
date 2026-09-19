@@ -454,6 +454,11 @@ async function getTempChannelsByOwner(guildId, ownerId) {
   return rows.map(withBlockedList).map(toSnake);
 }
 
+async function listAllTempChannelsForGuild(guildId) {
+  const rows = await prisma.tempChannel.findMany({ where: { guildId } });
+  return rows.map(withBlockedList).map(toSnake);
+}
+
 async function transferTempOwnership(channelId, newOwnerId) {
   return prisma.tempChannel.update({
     where: { channelId },
@@ -812,7 +817,7 @@ module.exports = {
   addWarn, getWarns, countWarns, clearWarns, addModLog,
   createTicket, getOpenTicketByUser, getOpenTicketByChannel, getTicketByChannel, claimTicket, closeTicket, countOpenTickets,
   openTempChannel, removeTempChannel, getTempChannel,
-  getTempChannelsByOwner, transferTempOwnership,
+  getTempChannelsByOwner, listAllTempChannelsForGuild, transferTempOwnership,
   setTempLocked, addBlockedUser, removeBlockedUser, clearBlockedUsers,
   saveVoiceRoom, getVoiceRoom, listVoiceRoomsByHub, deleteVoiceRoom,
   addVoiceHub, removeVoiceHub, removeVoiceHubById, getVoiceHubByChannel,

@@ -1,5 +1,6 @@
 'use strict';
 
+const { PermissionsBitField } = require('discord.js');
 const config = require('../config');
 const repo = require('../db/repo');
 const settingsResolver = require('../services/settings-resolver');
@@ -39,6 +40,7 @@ module.exports = {
   invalidateHubCache,
   liveSyncVoiceRoom,
   clearPanelSent,
+  enforceVerifiedVisibility,
   async execute(oldState, newState) {
     const guild = newState.guild || oldState.guild;
     if (!guild) return;
@@ -75,6 +77,24 @@ module.exports = {
         const temp = await repo.getTempChannel(channel.id);
         if (temp && temp.kind === 'voice') {
           await enforceBlockedAndLocked(channel, temp);
+          // Se la guild ha la verifica attiva, applica la visibility retroattiva
+          // sul canale (potrebbe essere stato creato prima del setup) e kicka
+          // chi è appena entrato senza il ruolo verificato.
+          const guildCfg = await repo.getGuildConfig(guild.id);
+          if (guildCfg.verified_role_id) {
+            await enforceVerifiedVisibility(channel, temp, guildCfg.verified_role_id);
+            if (member.roles?.cache?.has?.(guildCfg.verified_role_id)) {
+              // ok, resta
+            } else {
+              try {
+                await member.voice.setChannel(null, 'non verificato');
+                member.send({
+                  content: `Non sei verificato in **${guild.name}**. Usa \`/verify\` per accedere ai canali temporanei.`,
+                }).catch(() => {});
+              } catch (_) {}
+              return;
+            }
+          }
           // Anti-doppio-pannello: se Caso 3 viene triggerato più volte per lo
           // stesso canale (es. self-deaf toggle, riconnessioni), inviamo solo
           // il primo. Le entry scadono dopo PANEL_TTL_MS per evitare leak.
@@ -127,6 +147,58 @@ function invalidateHubCache(guildId) {
   else hubCache.clear();
 }
 
+// Applica il gating di verifica su un singolo canale temp voice:
+//   - deny ViewChannel+Connect per @everyone
+//   - allow ViewChannel+Connect per il ruolo verificato
+//   - kick di chi è attualmente dentro senza il ruolo (owner e bot esclusi)
+// Da richiamare sia su canali appena creati (è già applicato in createTempVoice)
+// sia su canali preesistenti quando l'admin attiva/disattiva la verifica.
+async function enforceVerifiedVisibility(channel, temp, verifiedRoleId) {
+  if (!channel || !temp || !verifiedRoleId) return;
+  try {
+    await channel.permissionOverwrites.edit(channel.guild.id, {
+      ViewChannel: false,
+      Connect: false,
+    }, { reason: 'verify gate: hide @everyone' });
+  } catch (err) {
+    logger.warn({ err: err.message, channel: channel.id }, 'verify gate: edit @everyone fallito');
+  }
+  try {
+    await channel.permissionOverwrites.edit(verifiedRoleId, {
+      ViewChannel: true,
+      Connect: true,
+    }, { reason: 'verify gate: show verified' });
+  } catch (err) {
+    logger.warn({ err: err.message, channel: channel.id }, 'verify gate: edit verified role fallito');
+  }
+
+  // Kick di chi è dentro senza il ruolo (owner + bot restano).
+  let members = channel.members;
+  if (!members || members.size === 0) {
+    try { await channel.fetch(); } catch (_) {}
+    members = channel.members;
+  }
+  const allow = new Set([temp.owner_id, channel.guild.members.me.id]);
+  for (const [, m] of members) {
+    if (allow.has(m.id)) continue;
+    if (m.roles?.cache?.has?.(verifiedRoleId)) continue;
+    try { await m.voice.setChannel(null, 'verify gate: non verificato'); } catch (_) {}
+  }
+}
+
+// Applica enforceVerifiedVisibility a tutti i temp voice della guild.
+// Usato dopo aver attivato/disattivato la verifica da /settings verify role
+// per retroattivamente aggiornare i canali già esistenti.
+async function enforceVerifiedVisibilityForGuild(guild, verifiedRoleId) {
+  if (!guild || !verifiedRoleId) return;
+  const temps = await repo.listAllTempChannelsForGuild(guild.id).catch(() => []);
+  for (const t of temps) {
+    const channel = guild.channels.cache.get(t.channel_id);
+    if (!channel || t.kind !== 'voice') continue;
+    await enforceVerifiedVisibility(channel, t, verifiedRoleId);
+  }
+}
+
 async function enforceBlockedAndLocked(channel, temp) {
   // Rispetta la modalità lock + il blocco per singolo utente.
   if (!temp.locked && !(temp.blocked && temp.blocked.length)) return;
@@ -153,6 +225,25 @@ async function enforceBlockedAndLocked(channel, temp) {
 
 async function createTempVoice(guild, parent, member, hubChannelId) {
   try {
+    // Gate di verifica: se la guild ha configurato un ruolo "verificato"
+    // (`/settings verify role`), l'utente deve possederlo per creare (e
+    // vedere) i canali temp voice. Se non lo è, lo kickiamo dall'hub e
+    // proviamo ad avvisarlo via DM.
+    const guildCfg = await repo.getGuildConfig(guild.id);
+    const verifiedRoleId = guildCfg.verified_role_id;
+    if (verifiedRoleId && !member.roles?.cache?.has?.(verifiedRoleId)) {
+      try {
+        await member.voice.setChannel(null, 'non verificato');
+      } catch (_) {}
+      try {
+        await member.send({
+          content: `Non sei verificato in **${guild.name}**. Usa \`/verify\` per ottenere l'accesso ai canali vocali temporanei.`,
+        }).catch(() => {});
+      } catch (_) {}
+      logger.info({ user: member.id, guild: guild.id }, 'temp voice bloccato: utente non verificato');
+      return;
+    }
+
     // Prima di creare un nuovo canale, cerchiamo se l'owner ha già un temp
     // voice attivo per lo stesso hub (riga su TempChannel la cui cache lato
     // discord è ancora esistente). Se sì, spostiamo l'utente lì dentro e
@@ -188,11 +279,22 @@ async function createTempVoice(guild, parent, member, hubChannelId) {
     }
 
     const displayName = formatOwnerName(member.user.username);
+
+    // Permission overwrites: se la guild ha il sistema di verifica attivo,
+    // nascondiamo il canale a @everyone e lo rendiamo visibile solo al ruolo
+    // "verificato". Altrimenti il canale segue i permessi del parent.
+    const permissionOverwrites = [];
+    if (verifiedRoleId) {
+      permissionOverwrites.push({ id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.Connect] });
+      permissionOverwrites.push({ id: verifiedRoleId, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.Connect] });
+    }
+
     const channel = await guild.channels.create({
       name: displayName,
       type: 2,
       parent,
       userLimit: initialUserLimit,
+      permissionOverwrites: permissionOverwrites.length ? permissionOverwrites : undefined,
       reason: 'Canale vocale temporaneo',
     });
 

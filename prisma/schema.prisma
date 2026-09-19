@@ -15,6 +15,7 @@ model GuildConfig {
   levelAnnounceChannelId String?
   tempVoiceHubId         String?
   autoRoleId             String?
+  verifiedRoleId         String?
   welcomeChannelId       String?
   welcomeMessage         String?
   prefix                 String  @default("!")
