@@ -154,29 +154,36 @@ async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass 
   // Deferiamo subito: Discord ha un timeout hard di 3s sul primo reply.
   // Senza defer, se sharp o una query lenta sforano, l'utente vede
   // "L'applicazione non ha risposto" anche se il bot sta lavorando.
+  let deferred = false;
   try {
     await interaction.deferReply({ ephemeral: true });
+    deferred = true;
   } catch (err) {
-    logger.warn({ err: err.message }, 'verify: deferReply fallito');
-    return;
+    logger.warn({ err: err.message }, 'verify: deferReply fallito, riprovo con reply normale');
   }
+
+  // Helper: risponde con editReply se deferred, altrimenti reply normale.
+  const respond = (payload) => deferred
+    ? interaction.editReply(payload)
+    : interaction.reply(payload);
+
   const cfg = await repo.getGuildConfig(interaction.guildId);
   const roleId = cfg.verified_role_id;
   if (!roleId) {
-    return interaction.editReply({
+    return respond({
       embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Verifica non configurata').setDescription('Il ruolo verificato non è stato impostato. Chiedi a uno staff di configurarlo con `/settings verify role`.').setTimestamp()],
     });
   }
 
   const member = interaction.member;
   if (!skipAlreadyVerified && member?.roles?.cache?.has(roleId)) {
-    return interaction.editReply({
+    return respond({
       embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('Sei già verificato').setDescription(`Hai già il ruolo <@&${roleId}>.`).setTimestamp()],
     });
   }
 
   if (!skipStaffBypass && hasElevatedPermissions(member)) {
-    return interaction.editReply({
+    return respond({
       embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('Verifica automatica').setDescription('Hai permessi elevati, sei considerato verificato.').setTimestamp()],
     });
   }
@@ -188,15 +195,6 @@ async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass 
     : mode < 2 / 3
       ? buildEmojiChallenge()
       : buildImageChallenge();
-
-  // La conversione sharp SVG→PNG può richiedere alcuni secondi su container
-  // piccoli. Se è la modalità immagine, deferReply per evitare il timeout
-  // di Discord (3s) prima ancora che sharp finisca.
-  if (ch.kind === 'img') {
-    try {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    } catch (_) {}
-  }
 
   const challengeId = makeChallengeId();
   const now = Date.now();
@@ -246,13 +244,13 @@ async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass 
       payload.files = [{ attachment: png, name: 'captcha.png' }];
     } catch (err) {
       logger.warn({ err: err.message }, 'sharp SVG->PNG fallito');
-      return interaction.editReply({
+      return respond({
         embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Errore captcha').setDescription('Impossibile generare l\'immagine. Riprova con `/verify`.')],
       });
     }
   }
 
-  await interaction.editReply(payload);
+  await respond(payload);
 }
 
 async function handleComponent(interaction) {
