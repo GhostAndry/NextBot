@@ -183,6 +183,15 @@ async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass 
       ? buildEmojiChallenge()
       : buildImageChallenge();
 
+  // La conversione sharp SVG→PNG può richiedere alcuni secondi su container
+  // piccoli. Se è la modalità immagine, deferReply per evitare il timeout
+  // di Discord (3s) prima ancora che sharp finisca.
+  if (ch.kind === 'img') {
+    try {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    } catch (_) {}
+  }
+
   const challengeId = makeChallengeId();
   const now = Date.now();
   gcChallenges(now);
@@ -231,14 +240,17 @@ async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass 
       payload.files = [{ attachment: png, name: 'captcha.png' }];
     } catch (err) {
       logger.warn({ err: err.message }, 'sharp SVG->PNG fallito');
-      return interaction.reply({
+      return interaction.editReply({
         embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Errore captcha').setDescription('Impossibile generare l\'immagine. Riprova con `/verify`.')],
-        flags: MessageFlags.Ephemeral,
       });
     }
   }
 
-  await interaction.reply(payload);
+  if (interaction.deferred) {
+    await interaction.editReply(payload);
+  } else {
+    await interaction.reply(payload);
+  }
 }
 
 async function handleComponent(interaction) {
