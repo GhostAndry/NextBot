@@ -41,6 +41,7 @@ module.exports = {
   liveSyncVoiceRoom,
   clearPanelSent,
   enforceVerifiedVisibility,
+  enforceVerifiedVisibilityForGuild,
   async execute(oldState, newState) {
     const guild = newState.guild || oldState.guild;
     if (!guild) return;
