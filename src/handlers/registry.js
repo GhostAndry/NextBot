@@ -37,6 +37,18 @@ function registerCommand(filepath) {
   commands.set(cmd.data.name, cmd);
   commandMeta.push(cmd.data.toJSON());
   logger.debug({ cmd: cmd.data.name }, 'loaded command');
+
+  // Un file può esporre più comandi correlati tramite `extraCommands`
+  // (es. verify.js esporta /verify + /verify-test). Ogni entry deve avere
+  // la stessa shape { data, execute } (handleComponent opzionale).
+  if (Array.isArray(cmd.extraCommands)) {
+    for (const extra of cmd.extraCommands) {
+      if (!extra?.data || typeof extra.execute !== 'function') continue;
+      commands.set(extra.data.name, extra);
+      commandMeta.push(extra.data.toJSON());
+      logger.debug({ cmd: extra.data.name }, 'loaded extra command');
+    }
+  }
 }
 
 // --- Public API ------------------------------------------------------------

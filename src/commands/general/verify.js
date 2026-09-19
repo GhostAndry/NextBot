@@ -104,7 +104,22 @@ const data = new SlashCommandBuilder()
   .setName('verify')
   .setDescription('Avvia la verifica per ottenere il ruolo verificato');
 
+// /verify-test: stesso flusso di /verify ma pensato per testare captcha e UI
+// senza i guardrail di produzione (già verificato / staff bypass). Non skippia
+// nessun check di captcha: prova davvero la logica di validazione.
+const testData = new SlashCommandBuilder()
+  .setName('verify-test')
+  .setDescription('Testa il flusso captcha di /verify (non salta i check)');
+
 async function execute(interaction) {
+  return runChallenge(interaction, { skipAlreadyVerified: false, skipStaffBypass: false });
+}
+
+async function executeTest(interaction) {
+  return runChallenge(interaction, { skipAlreadyVerified: true, skipStaffBypass: true });
+}
+
+async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass }) {
   const cfg = await repo.getGuildConfig(interaction.guildId);
   const roleId = cfg.verified_role_id;
   if (!roleId) {
@@ -115,14 +130,14 @@ async function execute(interaction) {
   }
 
   const member = interaction.member;
-  if (member?.roles?.cache?.has(roleId)) {
+  if (!skipAlreadyVerified && member?.roles?.cache?.has(roleId)) {
     return interaction.reply({
       embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('Sei già verificato').setDescription(`Hai già il ruolo <@&${roleId}>.`).setTimestamp()],
       flags: MessageFlags.Ephemeral,
     });
   }
 
-  if (hasElevatedPermissions(member)) {
+  if (!skipStaffBypass && hasElevatedPermissions(member)) {
     return interaction.reply({
       embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('Verifica automatica').setDescription('Hai permessi elevati, sei considerato verificato.').setTimestamp()],
       flags: MessageFlags.Ephemeral,
@@ -163,7 +178,7 @@ async function execute(interaction) {
 
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
-    .setTitle('🔐 Verifica')
+    .setTitle('🔐 Verifica' + (skipAlreadyVerified ? ' (test)' : ''))
     .setDescription(prompt)
     .setFooter({ text: 'Captcha effimero: solo tu puoi vedere questo messaggio.' })
     .setTimestamp();
@@ -225,4 +240,11 @@ async function handleComponent(interaction) {
   });
 }
 
-module.exports = { data, execute, handleComponent };
+module.exports = {
+  data,
+  execute,
+  handleComponent,
+  extraCommands: [
+    { data: testData, execute: executeTest },
+  ],
+};
