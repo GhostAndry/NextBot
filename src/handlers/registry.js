@@ -306,14 +306,26 @@ function attachEventHandlers(client) {
   for (const entry of fs.readdirSync(eventsDir)) {
     if (!entry.endsWith('.js')) continue;
     delete require.cache[require.resolve(path.join(eventsDir, entry))];
-    const evt = require(path.join(eventsDir, entry));
-    if (!evt.name || typeof evt.execute !== 'function') continue;
+    const mod = require(path.join(eventsDir, entry));
 
-    const handler = (...args) => safeExecute(evt, ...args);
-    if (evt.once) client.once(evt.name, handler);
-    else client.on(evt.name, handler);
+    // Un modulo può esporre più eventi correlati (es. ready.js espone sia
+    // `ready` che `clientReady` per silenziare la DeprecationWarning di v15).
+    // Raccogliamo tutti gli eventi definiti ed escludiamo le funzioni helper.
+    const events = [];
+    for (const [key, value] of Object.entries(mod)) {
+      if (value && typeof value === 'object' && typeof value.execute === 'function' && typeof value.name === 'string') {
+        events.push({ key, evt: value });
+      }
+    }
+    if (events.length === 0) continue;
 
-    logger.debug({ evt: evt.name, file: entry }, 'attached event');
+    for (const { key, evt } of events) {
+      const handler = (...args) => safeExecute(evt, ...args);
+      if (evt.once) client.once(evt.name, handler);
+      else client.on(evt.name, handler);
+
+      logger.debug({ evt: evt.name, file: entry, exportKey: key }, 'attached event');
+    }
   }
 }
 
