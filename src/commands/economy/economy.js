@@ -3,7 +3,7 @@
 const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const config = require('../../config');
 const repo = require('../../db/repo');
-const { errorEmbed, successEmbed } = require('../../utils/helpers');
+const { errorEmbed, successEmbed, hasElevatedPermissions } = require('../../utils/helpers');
 
 const DAILY_COOLDOWN_S = 22 * 3600;
 const STREAK_WINDOW_S = 48 * 3600;
@@ -66,6 +66,17 @@ async function cmdDaily(interaction) {
   const user = await repo.getUser(interaction.user.id, interaction.guildId);
   const now = await repo.now();
 
+  // Bypass cooldown per admin/elevated: paghiamo la ricompensa senza toccare
+  // last_daily, così il timer dell'utente normale resta intatto.
+  if (hasElevatedPermissions(interaction.member)) {
+    const { reward, streak, bonus } = computeDailyReward({ ...user, last_daily: null, daily_streak: 0 }, now);
+    const fresh = await repo.getUser(interaction.user.id, interaction.guildId);
+    await repo.updateUser(interaction.user.id, interaction.guildId, {
+      wallet: fresh.wallet + reward,
+    });
+    return interaction.reply({ embeds: [successEmbed('Ricompensa giornaliera', `+${reward} monete (serie ${streak}, bonus ${bonus}).`)] });
+  }
+
   // Claim atomico per evitare race condition (due /daily simultanei bypassano
   // il check sequenziale read-then-write).
   if (await repo.claimDailyIfElapsed(interaction.user.id, interaction.guildId, now, cooldown, {
@@ -95,6 +106,19 @@ async function cmdDaily(interaction) {
 async function cmdWork(interaction) {
   const cfg = config.features.economy;
   const cooldown = cfg.workCooldownSeconds ?? 3600;
+
+  // Bypass cooldown per admin/elevated: paghiamo direttamente senza toccare
+  // last_work, così il timer dell'utente normale resta intatto.
+  if (hasElevatedPermissions(interaction.member)) {
+    const amount = cfg.workMin + Math.floor(Math.random() * (cfg.workMax - cfg.workMin));
+    const flavor = WORK_LINES[Math.floor(Math.random() * WORK_LINES.length)];
+    const fresh = await repo.getUser(interaction.user.id, interaction.guildId);
+    await repo.updateUser(interaction.user.id, interaction.guildId, {
+      wallet: fresh.wallet + amount,
+    });
+    return interaction.reply({ embeds: [successEmbed('Lavoro', `${flavor} Hai guadagnato **${amount}** monete.`)] });
+  }
+
   if (cooldown <= 0) return doWork(interaction, cfg, 0); // disabilitato
 
   const user = await repo.getUser(interaction.user.id, interaction.guildId);

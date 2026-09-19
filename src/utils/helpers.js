@@ -8,6 +8,22 @@ function hasPermission(member, perm) {
   return member.permissions?.has?.(perm);
 }
 
+// True se il member ha permessi "elevati": Administrator, oppure uno dei
+// permessi di moderazione pesante (Ban / Kick / Moderate Members).
+// Usato per bypassare i cooldown su comandi/azioni che normalmente limitano
+// l'utente per evitare abusi (economy, soundboard, ecc.).
+function hasElevatedPermissions(member) {
+  if (!member) return false;
+  const perms = member.permissions;
+  if (!perms?.has) return false;
+  return (
+    perms.has(PermissionFlagsBits.Administrator) ||
+    perms.has(PermissionFlagsBits.BanMembers) ||
+    perms.has(PermissionFlagsBits.KickMembers) ||
+    perms.has(PermissionFlagsBits.ModerateMembers)
+  );
+}
+
 function modEmbed(action, target, mod, reason, extra = {}) {
   const e = new EmbedBuilder()
     .setColor(0xed4245)
@@ -98,6 +114,7 @@ async function deferEphemeral(interaction) {
 
 module.exports = {
   hasPermission,
+  hasElevatedPermissions,
   modEmbed,
   infoEmbed,
   successEmbed,

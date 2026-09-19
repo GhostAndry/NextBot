@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../../config');
 const repo = require('../../db/repo');
-const { errorEmbed, successEmbed } = require('../../utils/helpers');
+const { errorEmbed, successEmbed, hasElevatedPermissions } = require('../../utils/helpers');
 const logger = require('../../utils/logger');
 const player = require('../../services/soundboard-player');
 
@@ -104,13 +104,15 @@ async function cmdPlay(interaction) {
   if (!fs.existsSync(sb.file_path)) return error(interaction, 'File audio mancante su disco.');
 
   const key = `${interaction.guildId}:${interaction.user.id}`;
-  const last = playCooldowns.get(key) || 0;
-  const remaining = PLAY_COOLDOWN_MS - (Date.now() - last);
-  if (remaining > 0) {
-    const secondsLeft = Math.ceil(remaining / 1000);
-    return error(interaction, `Aspetta **${secondsLeft}s** prima di lanciare un altro suono.`);
+  if (!hasElevatedPermissions(interaction.member)) {
+    const last = playCooldowns.get(key) || 0;
+    const remaining = PLAY_COOLDOWN_MS - (Date.now() - last);
+    if (remaining > 0) {
+      const secondsLeft = Math.ceil(remaining / 1000);
+      return error(interaction, `Aspetta **${secondsLeft}s** prima di lanciare un altro suono.`);
+    }
+    playCooldowns.set(key, Date.now());
   }
-  playCooldowns.set(key, Date.now());
 
   try {
     await player.play(interaction.guild, voice.channel, sb.file_path, config.features.soundboards.volume);
