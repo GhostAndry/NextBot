@@ -12,8 +12,10 @@ const {
   MessageFlags,
 } = require('discord.js');
 const svgCaptcha = require('svg-captcha');
+const sharp = require('sharp');
 const repo = require('../../db/repo');
 const { hasElevatedPermissions } = require('../../utils/helpers');
+const logger = require('../../utils/logger');
 
 // Sistema di verifica al join: gli utenti non ancora "verificati" non possono
 // creare/vedere i canali vocali temporanei (vedi events/voiceStateUpdate e
@@ -114,7 +116,11 @@ function buildImageChallenge() {
     color: false,
     background: '#f0f0f0',
   });
-  // Per le captcha-immagine il correct è la stringa testuale.
+  // Discord a volte mostra gli allegati SVG come file di testo. Convertiamo
+  // in PNG via sharp: output universalmente renderizzato come immagine.
+  // NB: buildImageChallenge è sincrono, ma la conversione è async: la
+  // facciamo a parte in runChallenge passando la promise.
+  const pngPromise = sharp(Buffer.from(data, 'utf8')).png().toBuffer();
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('verify:btn:img-input:placeholder')
@@ -122,7 +128,7 @@ function buildImageChallenge() {
       .setEmoji('📝')
       .setStyle(ButtonStyle.Secondary),
   );
-  return { kind: 'img', correct: text.toLowerCase(), rows: [row], svg: data, size };
+  return { kind: 'img', correct: text.toLowerCase(), rows: [row], pngPromise, size };
 }
 
 const data = new SlashCommandBuilder()
@@ -220,8 +226,16 @@ async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass 
 
   const payload = { embeds: [embed], components: ch.rows, flags: MessageFlags.Ephemeral };
   if (ch.kind === 'img') {
-    // Alleghiamo l'SVG come file. Discord lo renderizza inline.
-    payload.files = [{ attachment: Buffer.from(ch.svg, 'utf8'), name: 'captcha.svg' }];
+    try {
+      const png = await ch.pngPromise;
+      payload.files = [{ attachment: png, name: 'captcha.png' }];
+    } catch (err) {
+      logger.warn({ err: err.message }, 'sharp SVG->PNG fallito');
+      return interaction.reply({
+        embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Errore captcha').setDescription('Impossibile generare l\'immagine. Riprova con `/verify`.')],
+        flags: MessageFlags.Ephemeral,
+      });
+    }
   }
 
   await interaction.reply(payload);
