@@ -189,9 +189,16 @@ async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass 
 async function handleComponent(interaction) {
   if (!interaction.isButton()) return false;
   // customId: verify:captcha:<challengeId>:<picked>:<placeholder>
+  // oppure:  verify:btn:start (bottone "Verifica" nell'embed pubblico)
   const parts = interaction.customId.split(':');
-  if (parts.length < 5 || parts[0] !== 'verify' || parts[1] !== 'captcha') return false;
+  if (parts.length < 3 || parts[0] !== 'verify') return false;
 
+  // Bottone "Verifica" nell'embed pubblico: apri captcha come /verify.
+  if (parts[1] === 'btn' && parts[2] === 'start') {
+    return runChallenge(interaction, { skipAlreadyVerified: false, skipStaffBypass: false });
+  }
+
+  if (parts[1] !== 'captcha' || parts.length < 5) return false;
   const challengeId = parts[2];
   const picked = Number.parseInt(parts[3], 10);
   if (!Number.isFinite(picked)) return false;

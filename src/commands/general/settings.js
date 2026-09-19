@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder, PermissionFlagsBits, ChannelType, EmbedBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, ChannelType, EmbedBuilder, MessageFlags, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const repo = require('../../db/repo');
 const settingsResolver = require('../../services/settings-resolver');
 const { successEmbed, errorEmbed } = require('../../utils/helpers');
@@ -44,6 +44,7 @@ const data = new SlashCommandBuilder()
   )
   .addSubcommandGroup((group) => group.setName('verify').setDescription('Sistema di verifica al join')
     .addSubcommand((sc) => sc.setName('role').setDescription('Imposta il ruolo "verificato"').addRoleOption((o) => o.setName('ruolo').setDescription('Ruolo da assegnare dopo la verifica').setRequired(true)))
+    .addSubcommand((sc) => sc.setName('channel').setDescription('Canale dove postare l\'embed con il bottone "Verifica"').addChannelOption((o) => o.setName('canale').setDescription('Canale testuale').addChannelTypes(ChannelType.GuildText).setRequired(true)))
     .addSubcommand((sc) => sc.setName('disable').setDescription('Disattiva la verifica (rimuovi ruolo)')),
   )
   .addSubcommandGroup((group) => group.setName('welcome').setDescription('Messaggio di benvenuto')
@@ -126,6 +127,7 @@ const HANDLERS = {
   'autorole:disable': autoroleDisable,
   'autorole:toggle': autoroleToggle,
   'verify:role': verifyRole,
+  'verify:channel': verifyChannel,
   'verify:disable': verifyDisable,
   'welcome:channel': welcomeChannel,
   'welcome:message': welcomeMessage,
@@ -188,7 +190,7 @@ async function showAll(interaction, cfg, settings) {
     'Usa `/settings show sezione:<nome>` per il dettaglio di una singola area.',
     '',
     `🎉 **Autorole & benvenuto** — ruolo: ${fmtRole(cfg.auto_role_id)}, canale welcome: ${fmtChannel(interaction, cfg.welcome_channel_id)}`,
-    `✅ **Verifica** — ruolo: ${fmtRole(cfg.verified_role_id)}`,
+    `✅ **Verifica** — ruolo: ${fmtRole(cfg.verified_role_id)}, canale: ${fmtChannel(interaction, cfg.verified_notify_channel_id)}`,
     `🎫 **Ticket** — categoria: ${fmtChannel(interaction, cfg.ticket_category_id)}, log: ${fmtChannel(interaction, cfg.ticket_log_channel_id)}`,
     `🔊 **Voce** — ${hubLine}`,
     `🛡️ **Moderazione** — log: ${fmtChannel(interaction, cfg.mod_log_channel_id)}, mute role: ${fmtRole(cfg.mute_role_id)}`,
@@ -214,7 +216,8 @@ function showVerify(interaction, cfg, settings) {
     .addFields(
       { name: 'Ruolo verificato', value: fmtRole(cfg.verified_role_id), inline: true },
       { name: 'Verifica attiva', value: fmtBool(settings.verifyEnabled, false), inline: true },
-      { name: 'Comando', value: '`/verify` apre un captcha effimero (numero 1-15 o emoji) per ottenere il ruolo.' },
+      { name: 'Canale embed', value: fmtChannel(interaction, cfg.verified_notify_channel_id), inline: true },
+      { name: 'Comandi', value: '`/verify` apre un captcha effimero. `verify-test` per provare la UI senza assegnare il ruolo.' },
     ).setTimestamp();
 }
 
@@ -334,9 +337,30 @@ async function verifyRole(interaction) {
 }
 
 async function verifyDisable(interaction) {
-  await repo.setGuildConfig(interaction.guildId, { verified_role_id: null });
+  await repo.setGuildConfig(interaction.guildId, { verified_role_id: null, verified_notify_channel_id: null });
   await settingsResolver.setSetting(interaction.guildId, 'verifyEnabled', false);
   await interaction.reply({ embeds: [successEmbed('Verifica disattivata', 'Sistema di verifica rimosso. I vocali temporanei tornano accessibili a tutti.')], flags: MessageFlags.Ephemeral });
+}
+
+async function verifyChannel(interaction) {
+  const channel = interaction.options.getChannel('canale');
+  await repo.setGuildConfig(interaction.guildId, { verified_notify_channel_id: channel.id });
+  // Manda lì l'embed con il bottone di verifica
+  const verifyCmd = require('./verify');
+  const startRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('verify:btn:start').setLabel('Verifica').setStyle(ButtonStyle.Success).setEmoji('🔐'),
+  );
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('🔐 Verifica')
+    .setDescription('Clicca il bottone qui sotto per avviare la verifica. Ti verrà chiesto un captcha (numero o emoji). Se superi la verifica riceverai il ruolo verificato.')
+    .setTimestamp();
+  try {
+    await channel.send({ embeds: [embed], components: [startRow] });
+  } catch (err) {
+    return error(interaction, `Non riesco a scrivere in ${channel}: ${err.message}`);
+  }
+  await interaction.reply({ embeds: [successEmbed('Canale verifica', `Impostato su ${channel}. L'embed con il bottone è stato postato lì.`)], flags: MessageFlags.Ephemeral });
 }
 
 // --- welcome ---------------------------------------------------------------
