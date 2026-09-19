@@ -151,27 +151,33 @@ async function executeTest(interaction) {
 }
 
 async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass }) {
+  // Deferiamo subito: Discord ha un timeout hard di 3s sul primo reply.
+  // Senza defer, se sharp o una query lenta sforano, l'utente vede
+  // "L'applicazione non ha risposto" anche se il bot sta lavorando.
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'verify: deferReply fallito');
+    return;
+  }
   const cfg = await repo.getGuildConfig(interaction.guildId);
   const roleId = cfg.verified_role_id;
   if (!roleId) {
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Verifica non configurata').setDescription('Il ruolo verificato non è stato impostato. Chiedi a uno staff di configurarlo con `/settings verify role`.').setTimestamp()],
-      flags: MessageFlags.Ephemeral,
     });
   }
 
   const member = interaction.member;
   if (!skipAlreadyVerified && member?.roles?.cache?.has(roleId)) {
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('Sei già verificato').setDescription(`Hai già il ruolo <@&${roleId}>.`).setTimestamp()],
-      flags: MessageFlags.Ephemeral,
     });
   }
 
   if (!skipStaffBypass && hasElevatedPermissions(member)) {
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('Verifica automatica').setDescription('Hai permessi elevati, sei considerato verificato.').setTimestamp()],
-      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -246,11 +252,7 @@ async function runChallenge(interaction, { skipAlreadyVerified, skipStaffBypass 
     }
   }
 
-  if (interaction.deferred) {
-    await interaction.editReply(payload);
-  } else {
-    await interaction.reply(payload);
-  }
+  await interaction.editReply(payload);
 }
 
 async function handleComponent(interaction) {
