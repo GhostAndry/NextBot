@@ -12,6 +12,7 @@ module.exports = {
   name: 'interactionCreate',
   async execute(interaction) {
     if (!interaction.guildId) return;
+    require('../utils/logger').debug({ type: interaction.type, name: interaction.commandName || interaction.customId, user: interaction.user?.id }, 'interaction received');
 
     if (interaction.isChatInputCommand() || interaction.isUserContextMenuCommand() || interaction.isMessageContextMenuCommand()) {
       return dispatchCommand(interaction);

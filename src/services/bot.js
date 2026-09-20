@@ -33,6 +33,14 @@ async function startLeaderBot() {
 
   registerAll(client);
 
+  // Diagnostica: log eventi del WebSocket per capire se Discord sta parlando con noi
+  client.ws.on('ready', () => logger.info('ws: READY frame received'));
+  client.ws.on('resumed', () => logger.info('ws: session resumed'));
+  client.ws.on('hello', (data) => logger.info({ interval: data?.heartbeat_interval }, 'ws: HELLO received'));
+  client.ws.on('disconnect', (code, reason) => logger.warn({ code, reason }, 'ws: disconnected'));
+  client.ws.on('error', (err) => logger.warn({ err: err.message }, 'ws: error'));
+  client.on('raw', (packet) => logger.debug({ t: packet.t }, 'ws: raw packet'));
+
   const credentials = config.requireDiscord();
   await client.login(credentials.botToken);
 
@@ -42,10 +50,16 @@ async function startLeaderBot() {
         {
           user: client.user.tag,
           guilds: client.guilds.cache.size,
+          wsPing: client.ws.ping,
           node: config.node.id,
         },
         'bot online as leader',
       );
+      // Diagnostica: ping ogni 10s per vedere se il gateway è vivo
+      const tick = setInterval(() => {
+        logger.info({ wsPing: client.ws.ping, status: client.ws.status }, 'ws: tick');
+      }, 10000);
+      client.once('destroy', () => clearInterval(tick));
       // Sincronizza il voiceStateTracker con i canali temp attivi nel DB.
       // Best-effort: se fallisce, riproviamo al primo evento voiceStateUpdate.
       voiceTracker.syncFromDatabase().catch((err) =>

@@ -16,6 +16,7 @@ const logger = require('../utils/logger');
 module.exports = {
   name: 'messageCreate',
   async execute(message) {
+    logger.info({ author: message.author?.tag, content: message.content?.slice(0, 30) }, 'messageCreate received');
     if (message.author.bot || !message.guildId) return;
 
     const enabled = await settingsResolver.getSetting(message.guildId, 'xpEnabled', config.features.levels.enabled);

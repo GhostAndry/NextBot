@@ -308,11 +308,21 @@ function attachEventHandlers(client) {
     delete require.cache[require.resolve(path.join(eventsDir, entry))];
     const mod = require(path.join(eventsDir, entry));
 
-    // Un modulo può esporre più eventi correlati (es. ready.js espone sia
-    // `ready` che `clientReady` per silenziare la DeprecationWarning di v15).
-    // Raccogliamo tutti gli eventi definiti ed escludiamo le funzioni helper.
+    // Raccogliamo gli event handler definiti. Un modulo può esporre:
+    //   (a) un singolo evento come `module.exports = { name, execute }`
+    //       (es. messageCreate.js) — l'event è il module.exports stesso
+    //   (b) più eventi correlati tramite proprietà aggiuntive
+    //       (es. ready.js: module.exports.clientReady = { name, execute })
     const events = [];
+
+    // Caso (a): il module.exports stesso è un evento (ha name + execute)
+    if (typeof mod.execute === 'function' && typeof mod.name === 'string') {
+      events.push({ key: '<module.exports>', evt: mod });
+    }
+
+    // Caso (b): proprietà aggiuntive che sono event (es. clientReady)
     for (const [key, value] of Object.entries(mod)) {
+      if (key === 'name' || key === 'execute' || key === 'once') continue;
       if (value && typeof value === 'object' && typeof value.execute === 'function' && typeof value.name === 'string') {
         events.push({ key, evt: value });
       }
