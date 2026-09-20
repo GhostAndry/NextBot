@@ -301,12 +301,12 @@ async function cmdLeaderboard(interaction) {
   if (totalPages > 1) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId(`lb:${tipo}:${page - 1}`)
+.setCustomId(`economy:lb:${tipo}:${page - 1}`)
         .setLabel('◀')
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(page <= 1),
       new ButtonBuilder()
-        .setCustomId(`lb:${tipo}:${page + 1}`)
+.setCustomId(`economy:lb:${tipo}:${page + 1}`)
         .setLabel('▶')
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(page >= totalPages),
@@ -341,9 +341,10 @@ function formatValue(r, tipo) {
 async function handleLeaderboardButton(interaction) {
   if (!interaction.isButton()) return false;
   const parts = interaction.customId.split(':');
-  if (parts.length !== 3 || parts[0] !== 'lb') return false;
-  const tipo = parts[1];
-  const page = Math.max(1, parseInt(parts[2], 10) || 1);
+  // customId: economy:lb:<tipo>:<page>  →  strip "economy" prefix
+  if (parts[0] !== 'economy' || parts[1] !== 'lb' || parts.length !== 4) return false;
+  const tipo = parts[2];
+  const page = Math.max(1, parseInt(parts[3], 10) || 1);
 
   // Simulo un'interaction "finta" per riutilizzare cmdLeaderboard? Più pulito:
   // chiamo direttamente il fetch + render inline.
@@ -380,8 +381,8 @@ async function handleLeaderboardButton(interaction) {
     .setFooter({ text: `Pagina ${page}/${totalPages} • ${sorted.length} utenti classificati` })
     .setTimestamp();
   const components = totalPages > 1 ? [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`lb:${tipo}:${page - 1}`).setLabel('◀').setStyle(ButtonStyle.Secondary).setDisabled(page <= 1),
-    new ButtonBuilder().setCustomId(`lb:${tipo}:${page + 1}`).setLabel('▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages),
+    new ButtonBuilder().setCustomId(`economy:lb:${tipo}:${page - 1}`).setLabel('◀').setStyle(ButtonStyle.Secondary).setDisabled(page <= 1),
+    new ButtonBuilder().setCustomId(`economy:lb:${tipo}:${page + 1}`).setLabel('▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages),
   )] : [];
   await interaction.update({ embeds: [embed], components });
   return true;

@@ -81,7 +81,7 @@ async function cmdStart(interaction) {
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`gw:join:${gwId}`)
+      .setCustomId(`giveaway:join:${gwId}`)
       .setLabel('Partecipa (0)')
       .setStyle(ButtonStyle.Success)
       .setEmoji('🎉'),
@@ -179,7 +179,7 @@ async function endGiveaway(gwId, client) {
         .setFooter({ text: `Avviato da <@${gw.hostId}>` })
         .setTimestamp();
       const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`gw:join:${gw.id}`).setLabel('Partecipa').setStyle(ButtonStyle.Secondary).setDisabled(true).setEmoji('🎉'),
+        new ButtonBuilder().setCustomId(`giveaway:join:${gw.id}`).setLabel('Partecipa').setStyle(ButtonStyle.Secondary).setDisabled(true).setEmoji('🎉'),
       );
       await msg.edit({ embeds: [embed], components: [row] });
     }
@@ -233,7 +233,7 @@ function pickRandom(arr) {
 async function handleComponent(interaction) {
   if (!interaction.isButton()) return false;
   const parts = interaction.customId.split(':');
-  if (parts.length !== 3 || parts[0] !== 'gw' || parts[1] !== 'join') return false;
+  if (parts.length !== 3 || parts[0] !== 'giveaway' || parts[1] !== 'join') return false;
   const gwId = parts[2];
   const gw = giveaways.get(gwId);
   if (!gw) {
@@ -272,7 +272,7 @@ async function updateGiveawayButton(gw) {
   if (!msg) return;
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`gw:join:${gw.id}`)
+      .setCustomId(`giveaway:join:${gw.id}`)
       .setLabel(`Partecipa (${gw.entries.size})`)
       .setStyle(ButtonStyle.Success)
       .setEmoji('🎉'),
