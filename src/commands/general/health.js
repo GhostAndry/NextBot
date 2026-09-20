@@ -65,7 +65,7 @@ async function execute(interaction) {
       { name: '⚖️ Load avg (1/5/15)', value: loadAvg.map((v) => v.toFixed(2)).join(' / '), inline: true },
       { name: '🗄️ DB smoke test', value: dbOk ? `✅ OK (${dbLatencyMs} ms)` : `❌ ${dbLatencyMs}`, inline: true },
       { name: '🟢 Node', value: process.version, inline: true },
-      { name: '📚 discord.js', value: require('discord.js/package.json').version, inline: true },
+      { name: '📚 discord.js', value: require('discord.js').version, inline: true },
       { name: '🏓 Shard', value: `WS status ${client.ws.status}`, inline: true },
     )
     .setTimestamp();
