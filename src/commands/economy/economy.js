@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const config = require('../../config');
 const repo = require('../../db/repo');
 const { errorEmbed, successEmbed, hasElevatedPermissions } = require('../../utils/helpers');
@@ -8,6 +8,7 @@ const { errorEmbed, successEmbed, hasElevatedPermissions } = require('../../util
 const DAILY_COOLDOWN_S = 22 * 3600;
 const STREAK_WINDOW_S = 48 * 3600;
 const ROB_FINE = 50;
+const PAGE_SIZE = 10;
 const WORK_LINES = [
   'Hai riparato un server.',
   'Hai scritto del codice.',
@@ -30,7 +31,15 @@ const data = new SlashCommandBuilder()
   .addSubcommand((sc) => sc.setName('withdraw').setDescription('Sposta dalla banca al portafoglio').addIntegerOption((o) => o.setName('importo').setDescription('Importo da prelevare').setRequired(true).setMinValue(1)))
   .addSubcommand((sc) => sc.setName('give').setDescription('Dai monete a un utente').addUserOption((o) => o.setName('utente').setDescription('Destinatario').setRequired(true)).addIntegerOption((o) => o.setName('importo').setDescription('Importo da trasferire').setRequired(true).setMinValue(1)))
   .addSubcommand((sc) => sc.setName('rob').setDescription('Prova a derubare un utente').addUserOption((o) => o.setName('utente').setDescription('Vittima').setRequired(true)))
-  .addSubcommand((sc) => sc.setName('leaderboard').setDescription('Gli utenti più ricchi'));
+  .addSubcommand((sc) => sc.setName('leaderboard').setDescription('Classifica ricchi/XP del server')
+    .addStringOption((o) => o.setName('tipo').setDescription('Cosa classificare').setRequired(false)
+      .addChoices(
+        { name: 'Totale (wallet + bank)', value: 'total' },
+        { name: 'Wallet', value: 'wallet' },
+        { name: 'Bank', value: 'bank' },
+        { name: 'XP / Livello', value: 'xp' },
+      ))
+    .addIntegerOption((o) => o.setName('pagina').setDescription('Pagina (10 utenti per pagina)').setMinValue(1).setRequired(false)));
 
 // --- Dispatcher -----------------------------------------------------------
 
@@ -96,11 +105,30 @@ async function cmdDaily(interaction) {
       wallet: fresh.wallet + reward,
       daily_streak: streak,
     });
-    return interaction.reply({ embeds: [successEmbed('Ricompensa giornaliera', `+${reward} monete (serie ${streak}, bonus ${bonus}).`)] });
+    const streakEmoji = streak >= 7 ? '🔥' : streak >= 3 ? '⚡' : '⭐';
+    return interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setColor(0x57f287)
+        .setTitle('🎁 Ricompensa giornaliera')
+        .setDescription(`Hai ricevuto **+${reward} monete**.`)
+        .addFields(
+          { name: `${streakEmoji} Serie attuale`, value: `**${streak}** giorno${streak === 1 ? '' : 'i'}${bonus > 0 ? ` (+${bonus} bonus)` : ''}`, inline: true },
+          { name: '⏭️ Prossimo daily', value: `<t:${now + cooldown}:R>`, inline: true },
+        )
+        .setFooter({ text: streak >= 7 ? 'Streak leggendario!' : `Continua la serie per bonus più alti.` })
+        .setTimestamp()],
+    });
   }
 
-  const hoursLeft = Math.ceil((cooldown - (now - user.last_daily)) / 3600);
-  return error(interaction, `Torna tra ${hoursLeft} ore.`);
+  const remainingSec = cooldown - (now - user.last_daily);
+  const hoursLeft = Math.floor(remainingSec / 3600);
+  const minutesLeft = Math.floor((remainingSec % 3600) / 60);
+  const nextTs = user.last_daily + cooldown;
+  return error(
+    interaction,
+    `Hai già riscosso oggi. Torna tra **${hoursLeft}h ${minutesLeft}m** (<t:${nextTs}:R>).` +
+      (user.daily_streak > 0 ? `\n🔥 Serie attuale: **${user.daily_streak}** giorni — non lasciarla scadere!` : ''),
+  );
 }
 
 async function cmdWork(interaction) {
@@ -210,18 +238,153 @@ async function cmdRob(interaction) {
 }
 
 async function cmdLeaderboard(interaction) {
-  const top = await repo.topWallet(interaction.guildId, 10);
-  if (top.length === 0) return error(interaction, 'Ancora nessun dato.');
+  const tipo = interaction.options.getString('tipo') || 'total';
+  const page = Math.max(1, interaction.options.getInteger('pagina') || 1);
+  const offset = (page - 1) * PAGE_SIZE;
 
-  const lines = await Promise.all(top.map(async (r, i) => {
-    const tag = await interaction.client.users.fetch(r.user_id).catch(() => null);
-    const total = (r.wallet || 0) + (r.bank || 0);
-    return `**${i + 1}.** ${tag ? tag.tag : r.user_id} — **${total.toLocaleString()}**`;
+  // Recupero tutti gli utenti della guild, sortati in JS perché Prisma su SQLite
+  // non supporta `orderBy` con campi calcolati (wallet+bank).
+  // Limite: 200 righe per evitare di tirare giù tutta la tabella su server grossi.
+  const allRows = await repo.prisma.user.findMany({
+    where: { guildId: interaction.guildId },
+    select: { userId: true, wallet: true, bank: true, xp: true, level: true },
+    take: 200,
+  });
+  if (allRows.length === 0) return error(interaction, 'Ancora nessun dato.');
+
+  const rankOf = makeRankOf(tipo);
+  const sorted = [...allRows].sort((a, b) => rankOf(b) - rankOf(a));
+
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  if (page > totalPages) {
+    return error(interaction, `La classifica ha solo ${totalPages} pagine. Riprova con pagina ≤ ${totalPages}.`);
+  }
+
+  const slice = sorted.slice(offset, offset + PAGE_SIZE);
+  const startRank = offset + 1;
+
+  // Fetch username in parallelo (con cache best-effort)
+  const entries = await Promise.all(slice.map(async (r, i) => {
+    let tag = r.userId;
+    try {
+      const u = await interaction.client.users.fetch(r.userId);
+      tag = u.tag;
+    } catch (_) {}
+    const medal = i === 0 && offset === 0 ? '🥇' : i === 1 && offset === 0 ? '🥈' : i === 2 && offset === 0 ? '🥉' : '`#' + (startRank + i) + '`';
+    const value = formatValue(r, tipo);
+    return `${medal} <@${r.userId}> — ${value}`;
   }));
 
-  await interaction.reply({
-    embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle('💰 Gli utenti più ricchi').setDescription(lines.join('\n'))],
+  const titleEmoji = tipo === 'xp' ? '📈' : '💰';
+  const title = tipo === 'xp' ? 'Livelli XP' : tipo === 'wallet' ? 'Wallet' : tipo === 'bank' ? 'Bank' : 'Totale monete';
+
+  // Posizione dell'utente che ha chiesto (se non è già nella pagina visibile)
+  let selfLine = '';
+  const myRank = sorted.findIndex((r) => r.userId === interaction.user.id) + 1;
+  if (myRank > 0) {
+    const me = sorted[myRank - 1];
+    const onPage = myRank >= startRank && myRank < startRank + slice.length;
+    if (!onPage) {
+      selfLine = `\n_La tua posizione: **#${myRank}** — ${formatValue(me, tipo)}_`;
+    }
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle(`${titleEmoji} Classifica — ${title}`)
+    .setDescription(entries.join('\n') + selfLine)
+    .setFooter({ text: `Pagina ${page}/${totalPages} • ${sorted.length} utenti classificati` })
+    .setTimestamp();
+
+  // Bottoni paginazione (solo se c'è più di una pagina)
+  const components = [];
+  if (totalPages > 1) {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`lb:${tipo}:${page - 1}`)
+        .setLabel('◀')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page <= 1),
+      new ButtonBuilder()
+        .setCustomId(`lb:${tipo}:${page + 1}`)
+        .setLabel('▶')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page >= totalPages),
+    );
+    components.push(row);
+  }
+
+  await interaction.reply({ embeds: [embed], components });
+}
+
+function makeRankOf(tipo) {
+  switch (tipo) {
+    case 'wallet': return (r) => r.wallet || 0;
+    case 'bank': return (r) => r.bank || 0;
+    case 'xp': return (r) => (r.level || 0) * 1000000 + (r.xp || 0); // livello prioritario, xp a parità
+    case 'total':
+    default: return (r) => (r.wallet || 0) + (r.bank || 0);
+  }
+}
+
+function formatValue(r, tipo) {
+  switch (tipo) {
+    case 'wallet': return `**${(r.wallet || 0).toLocaleString()}** 🪙`;
+    case 'bank': return `**${(r.bank || 0).toLocaleString()}** 🏦`;
+    case 'xp': return `Lv **${r.level || 0}** • ${(r.xp || 0).toLocaleString()} xp`;
+    case 'total':
+    default: return `**${((r.wallet || 0) + (r.bank || 0)).toLocaleString()}** 🪙`;
+  }
+}
+
+// Handler per i bottoni di paginazione. Riusa la logica del comando.
+async function handleLeaderboardButton(interaction) {
+  if (!interaction.isButton()) return false;
+  const parts = interaction.customId.split(':');
+  if (parts.length !== 3 || parts[0] !== 'lb') return false;
+  const tipo = parts[1];
+  const page = Math.max(1, parseInt(parts[2], 10) || 1);
+
+  // Simulo un'interaction "finta" per riutilizzare cmdLeaderboard? Più pulito:
+  // chiamo direttamente il fetch + render inline.
+  const offset = (page - 1) * PAGE_SIZE;
+  const allRows = await repo.prisma.user.findMany({
+    where: { guildId: interaction.guildId },
+    select: { userId: true, wallet: true, bank: true, xp: true, level: true },
+    take: 200,
   });
+  if (allRows.length === 0) {
+    return interaction.update({
+      embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Nessun dato').setTimestamp()],
+      components: [],
+    });
+  }
+  const rankOf = makeRankOf(tipo);
+  const sorted = [...allRows].sort((a, b) => rankOf(b) - rankOf(a));
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  if (page > totalPages) return false;
+  const slice = sorted.slice(offset, offset + PAGE_SIZE);
+  const startRank = offset + 1;
+  const entries = await Promise.all(slice.map(async (r, i) => {
+    let tag = r.userId;
+    try { tag = (await interaction.client.users.fetch(r.userId)).tag; } catch (_) {}
+    const medal = i === 0 && offset === 0 ? '🥇' : i === 1 && offset === 0 ? '🥈' : i === 2 && offset === 0 ? '🥉' : '`#' + (startRank + i) + '`';
+    return `${medal} <@${r.userId}> — ${formatValue(r, tipo)}`;
+  }));
+  const titleEmoji = tipo === 'xp' ? '📈' : '💰';
+  const title = tipo === 'xp' ? 'Livelli XP' : tipo === 'wallet' ? 'Wallet' : tipo === 'bank' ? 'Bank' : 'Totale monete';
+  const embed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle(`${titleEmoji} Classifica — ${title}`)
+    .setDescription(entries.join('\n'))
+    .setFooter({ text: `Pagina ${page}/${totalPages} • ${sorted.length} utenti classificati` })
+    .setTimestamp();
+  const components = totalPages > 1 ? [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`lb:${tipo}:${page - 1}`).setLabel('◀').setStyle(ButtonStyle.Secondary).setDisabled(page <= 1),
+    new ButtonBuilder().setCustomId(`lb:${tipo}:${page + 1}`).setLabel('▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages),
+  )] : [];
+  await interaction.update({ embeds: [embed], components });
+  return true;
 }
 
 // --- Helper ---------------------------------------------------------------
@@ -256,4 +419,4 @@ function error(interaction, msg) {
   return interaction.reply({ embeds: [errorEmbed('Errore', msg)], flags: MessageFlags.Ephemeral });
 }
 
-module.exports = { data, execute };
+module.exports = { data, execute, handleComponent: handleLeaderboardButton };
