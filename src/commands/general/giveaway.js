@@ -95,6 +95,7 @@ async function cmdStart(interaction) {
     channelId: reply.channelId,
     guildId: interaction.guildId,
     hostId: interaction.user.id,
+    client: interaction.client,
     premio,
     winnerCount,
     endsAt,
@@ -115,8 +116,13 @@ async function cmdEnd(interaction) {
   if (!gw) return interaction.reply({ embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Non trovato').setTimestamp()], flags: MessageFlags.Ephemeral });
   if (gw.ended) return interaction.reply({ embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle('Già terminato').setTimestamp()], flags: MessageFlags.Ephemeral });
   if (gw.timer) clearTimeout(gw.timer);
-  await endGiveaway(gw.id, interaction.client);
-  return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('Terminato').setDescription('Vincitori estratti e annunciati.').setTimestamp()], flags: MessageFlags.Ephemeral });
+  // Defer + fire-and-forget l'endGiveaway (che fa 3 API call lente) per non
+  // sforare il timeout di 3s di Discord.
+  await interaction.deferReply({ ephemeral: true });
+  endGiveaway(gw.id, interaction.client).catch((err) => {
+    logger.warn({ err: err.message, gwId: gw.id }, 'giveaway end fallito');
+  });
+  return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('Terminato').setDescription('Vincitori estratti e annunciati.').setTimestamp()] });
 }
 
 async function cmdReroll(interaction) {
@@ -244,27 +250,34 @@ async function handleComponent(interaction) {
     gw.entries.add(userId);
     joined = true;
   }
-  // Aggiorna bottone col conteggio
-  try {
-    const channel = await interaction.client.channels.fetch(gw.channelId);
-    if (channel?.isTextBased?.()) {
-      const msg = await channel.messages.fetch(gw.messageId);
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`gw:join:${gwId}`)
-          .setLabel(`Partecipa (${gw.entries.size})`)
-          .setStyle(joined ? ButtonStyle.Success : ButtonStyle.Secondary)
-          .setEmoji('🎉'),
-      );
-      await msg.edit({ components: [row] });
-    }
-  } catch (err) {
-    logger.warn({ err: err.message, gwId }, 'giveaway: aggiornamento conteggio fallito');
-  }
-  return interaction.reply({
-    embeds: [new EmbedBuilder().setColor(joined ? 0x57f287 : 0xfee75c).setTitle(joined ? '🎉 Partecipi!' : '😌 Hai lasciato il giveaway').setTimestamp()],
+
+  // Risposta ephemeral SUBITO (entro 3s). Poi in background aggiorniamo il
+  // bottone del messaggio con il nuovo conteggio: se Discord rallenta, l'utente
+  // ha già il feedback e l'edit arriva comunque (fire-and-forget).
+  await interaction.reply({
+    embeds: [new EmbedBuilder().setColor(joined ? 0x57f287 : 0xfee75c).setTitle(joined ? '🎉 Partecipi!' : '😌 Hai lasciato il giveaway').setDescription(joined ? 'Sei iscritto. In bocca al lupo!' : 'Non sei più iscritto.').setTimestamp()],
     flags: MessageFlags.Ephemeral,
   });
+
+  // Update bottone in background. Se fallisce, l'utente ha già la conferma.
+  updateGiveawayButton(gw).catch((err) => {
+    logger.warn({ err: err.message, gwId }, 'giveaway: aggiornamento bottone fallito');
+  });
+}
+
+async function updateGiveawayButton(gw) {
+  const channel = await gw.client?.channels.fetch(gw.channelId).catch(() => null);
+  if (!channel?.isTextBased?.()) return;
+  const msg = await channel.messages.fetch(gw.messageId).catch(() => null);
+  if (!msg) return;
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`gw:join:${gw.id}`)
+      .setLabel(`Partecipa (${gw.entries.size})`)
+      .setStyle(ButtonStyle.Success)
+      .setEmoji('🎉'),
+  );
+  await msg.edit({ components: [row] });
 }
 
 module.exports = { data, execute, handleComponent };
