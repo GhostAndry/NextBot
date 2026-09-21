@@ -23,23 +23,19 @@ const tempChannelModule = require('../commands/voice/tempchannel');
 //   - rinominati con prefisso 👑 + nome utente (marker owner, stile VoiceMaster)
 //
 // Risoluzione dell'hub e dei tunables: override per-guild (DB) > config globale.
+//
+// Il pannello di controllo è persistente: viene memorizzato l'ID del messaggio
+// su TempChannel.panelMessageId. Se reinviamo (es. rientro dopo lock/unlock
+// toggle, oppure recreate del canale), sendControlPanel cancella il precedente
+// prima di mandarne uno nuovo — niente duplicati nel canale.
 
 const OWNER_PREFIX = '👑 ';
 const pendingDeletes = new Map();
-// Protegge dal invio multiplo del pannello di controllo: anche se lo stesso
-// canale triggera Caso 3 più volte, il pannello arriva una volta sola.
-// Usiamo una Map+expires invece di un Set per evitare memory leak: se il
-// `channelDelete` non triggera (canale esterno, server glitch, ecc.) l'entry
-// resta solo per `PANEL_TTL_MS`, poi viene ignorata e rimossa al prossimo tick.
-const PANEL_TTL_MS = 24 * 60 * 60 * 1000;
-const panelSentFor = new Map();
-let lastPanelGc = 0;
 
 module.exports = {
   name: 'voiceStateUpdate',
   invalidateHubCache,
   liveSyncVoiceRoom,
-  clearPanelSent,
   enforceVerifiedVisibility,
   enforceVerifiedVisibilityForGuild,
   async execute(oldState, newState) {
@@ -67,7 +63,8 @@ module.exports = {
     }
 
     // Caso 3: utente entra in un nuovo canale non-hub → se è un temp voice,
-    // applichiamo enforcement e inviamo il pannello di controllo.
+    // applichiamo enforcement e reinviamo il pannello di controllo (che
+    // cancellerà il precedente se esiste).
     if (
       newState.channelId &&
       !hubIds.has(newState.channelId) &&
@@ -96,16 +93,9 @@ module.exports = {
               return;
             }
           }
-          // Anti-doppio-pannello: se Caso 3 viene triggerato più volte per lo
-          // stesso canale (es. self-deaf toggle, riconnessioni), inviamo solo
-          // il primo. Le entry scadono dopo PANEL_TTL_MS per evitare leak.
-          const now = Date.now();
-          gcPanelSent(now);
-          const sentAt = panelSentFor.get(channel.id);
-          if (!sentAt || now - sentAt > PANEL_TTL_MS) {
-            panelSentFor.set(channel.id, now);
-            tempChannelModule.sendControlPanel(channel);
-          }
+          // sendControlPanel gestisce il delete del pannello precedente per
+          // evitare duplicati nel canale (vedi TempChannel.panelMessageId).
+          tempChannelModule.sendControlPanel(channel);
         }
       }
     }
@@ -113,20 +103,6 @@ module.exports = {
   renameForNewOwner,
   OWNER_PREFIX,
 };
-
-function gcPanelSent(now) {
-  // GC pigro: una volta ogni 10 minuti svuotiamo le entry scadute.
-  if (now - lastPanelGc < 10 * 60 * 1000) return;
-  lastPanelGc = now;
-  for (const [id, sentAt] of panelSentFor) {
-    if (now - sentAt > PANEL_TTL_MS) panelSentFor.delete(id);
-  }
-}
-
-function clearPanelSent(channelId) {
-  if (channelId) panelSentFor.delete(channelId);
-  else panelSentFor.clear();
-}
 
 // Cache locale degli hub per guild (TTL 30s). Evita di rifare la query su
 // ogni evento voiceStateUpdate.

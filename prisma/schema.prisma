@@ -105,17 +105,21 @@ model Ticket {
 }
 
 model TempChannel {
-  channelId     String  @id
-  guildId       String
-  ownerId       String
-  kind          String
-  hubChannelId  String?
-  locked        Int     @default(0)
+  channelId       String  @id
+  guildId         String
+  ownerId         String
+  kind            String
+  hubChannelId    String?
+  locked          Int     @default(0)
   // JSON array di userId che hanno fatto kick / sono stati bloccati dal join
-  blocked       String  @default("[]")
+  blocked         String  @default("[]")
   // JSON array di userId banditi dal canale (permissionOverwrites Connect:false + auto-kick al join)
-  banned        String  @default("[]")
-  createdAt     Int?
+  banned          String  @default("[]")
+  // ID del messaggio del pannello di controllo (se presente). Usato per
+  // cancellare il pannello precedente quando ne reinviamo uno nuovo, evitando
+  // duplicati nel canale.
+  panelMessageId  String?
+  createdAt       Int?
 
   @@index([guildId, ownerId])
   @@index([guildId, hubChannelId])

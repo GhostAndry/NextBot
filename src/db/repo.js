@@ -485,6 +485,16 @@ async function setTempLocked(channelId, locked) {
   });
 }
 
+// Salva l'ID del messaggio del pannello di controllo mandato nel canale
+// temporaneo. Serve a sendControlPanel per cancellare il pannello vecchio
+// prima di reinviarne uno nuovo, evitando duplicati.
+async function setTempPanelMessageId(channelId, messageId) {
+  return prisma.tempChannel.update({
+    where: { channelId },
+    data: { panelMessageId: messageId },
+  });
+}
+
 async function addBlockedUser(channelId, userId) {
   const row = await prisma.tempChannel.findUnique({ where: { channelId } });
   if (!row) return [];
@@ -869,7 +879,7 @@ module.exports = {
   createTicket, getOpenTicketByUser, getOpenTicketByChannel, getTicketByChannel, claimTicket, closeTicket, countOpenTickets,
   openTempChannel, removeTempChannel, getTempChannel,
   getTempChannelsByOwner, listAllTempChannelsForGuild, transferTempOwnership,
-  setTempLocked, addBlockedUser, removeBlockedUser, clearBlockedUsers,
+  setTempLocked, setTempPanelMessageId, addBlockedUser, removeBlockedUser, clearBlockedUsers,
   banVoiceUser, unbanVoiceUser, clearBannedUsers,
   saveVoiceRoom, getVoiceRoom, listVoiceRoomsByHub, deleteVoiceRoom,
   addVoiceHub, removeVoiceHub, removeVoiceHubById, getVoiceHubByChannel,

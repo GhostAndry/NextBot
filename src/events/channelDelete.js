@@ -2,7 +2,6 @@
 
 const repo = require('../db/repo');
 const voiceTracker = require('../services/voice-state-tracker');
-const voiceStateEvent = require('./voiceStateUpdate');
 const logger = require('../utils/logger');
 
 module.exports = {
@@ -14,7 +13,6 @@ module.exports = {
     if (temp) {
       await repo.removeTempChannel(channel.id);
       voiceTracker.remove(channel.guildId, channel.id);
-      voiceStateEvent.clearPanelSent(channel.id);
       logger.info({ channel: channel.id }, 'record canale temporaneo ripulito');
     }
 

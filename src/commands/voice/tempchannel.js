@@ -846,7 +846,26 @@ async function sendControlPanel(channel) {
   try {
     const rows = buildControlRows();
     const temp = await repo.getTempChannel(channel.id);
-    await channel.send({ embeds: [buildPanel(channel, temp)], components: rows });
+    if (!temp) {
+      // Canale non più registrato come temp (es. appena cancellato): niente pannello.
+      return;
+    }
+
+    // Se esiste già un pannello precedente registrato, cancellalo per evitare
+    // duplicati nel canale. Se il messaggio non esiste più (cancellato a mano,
+    // scaduto, ecc.) ignora l'errore.
+    if (temp.panel_message_id) {
+      try {
+        const old = await channel.messages.fetch(temp.panel_message_id).catch(() => null);
+        if (old) await old.delete('aggiornamento pannello');
+      } catch (err) {
+        logger.warn({ err: err.message, channel: channel.id, message: temp.panel_message_id }, 'cancellazione pannello precedente fallita');
+      }
+    }
+
+    const sent = await channel.send({ embeds: [buildPanel(channel, temp)], components: rows });
+    await repo.setTempPanelMessageId(channel.id, sent.id).catch((err) =>
+      logger.warn({ err: err.message, channel: channel.id }, 'salvataggio panelMessageId fallito'));
   } catch (err) {
     logger.warn({ err: err.message, channel: channel.id }, 'invio pannello controllo fallito');
   }
