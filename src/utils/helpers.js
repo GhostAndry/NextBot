@@ -8,6 +8,18 @@ function hasPermission(member, perm) {
   return member.permissions?.has?.(perm);
 }
 
+// True se il member è owner del temp channel oppure ha il flag Administrator.
+// Usato per dare ai permessi elevati del guild lo stesso controllo che ha il
+// proprietario del canale temporaneo sulle azioni /voice (kick/ban/lock/etc),
+// sul context menu vkick/vban, e sui bottoni del pannello. Gli admin possono
+// quindi interagire con QUALSIASI vocale temporanea del guild come se fosse
+// la propria.
+function isOwnerOrAdmin(member, temp) {
+  if (!member) return false;
+  if (temp && temp.owner_id === member.id) return true;
+  return Boolean(member.permissions?.has?.(PermissionFlagsBits.Administrator));
+}
+
 // True se il member ha permessi "elevati": Administrator, oppure uno dei
 // permessi di moderazione pesante (Ban / Kick / Moderate Members).
 // Usato per bypassare i cooldown su comandi/azioni che normalmente limitano
@@ -126,6 +138,7 @@ module.exports = {
   hasPermission,
   hasElevatedPermissions,
   isVerified,
+  isOwnerOrAdmin,
   modEmbed,
   infoEmbed,
   successEmbed,

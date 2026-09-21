@@ -15,7 +15,7 @@
 // Per riammettere: /voice unban oppure il bottone Unban del pannello.
 
 const { ContextMenuCommandBuilder, ApplicationCommandType, MessageFlags } = require('discord.js');
-const { errorEmbed, successEmbed } = require('../../utils/helpers');
+const { errorEmbed, successEmbed, isOwnerOrAdmin } = require('../../utils/helpers');
 const repo = require('../../db/repo');
 const voiceStateEvent = require('../../events/voiceStateUpdate');
 const logger = require('../../utils/logger');
@@ -25,7 +25,9 @@ const data = new ContextMenuCommandBuilder()
   .setType(ApplicationCommandType.User);
 
 // Risoluzione ownership duplicata (piccola, evita import circolari con
-// tempchannel.js che è il command "voice").
+// tempchannel.js che è il command "voice"). L'utente può agire se è owner del
+// temp voice OPPURE se ha il flag Administrator (può fare tutto quello che
+// farebbe l'owner su QUALSIASI vocale temporanea del guild).
 async function resolveOwnedVoiceChannel(interaction) {
   const reply = (msg) => interaction.reply({ embeds: [errorEmbed('Errore', msg)], flags: MessageFlags.Ephemeral });
 
@@ -36,8 +38,8 @@ async function resolveOwnedVoiceChannel(interaction) {
   if (!temp || temp.kind !== 'voice') {
     return { ok: false, reply: () => reply('Questo canale non è un temp voice.') };
   }
-  if (temp.owner_id !== interaction.user.id) {
-    return { ok: false, reply: () => reply('Solo il proprietario può usare questo comando.') };
+  if (!isOwnerOrAdmin(interaction.member, temp)) {
+    return { ok: false, reply: () => reply('Solo il proprietario o un amministratore può usare questo comando.') };
   }
   return { ok: true, channel: voiceChannel, temp };
 }

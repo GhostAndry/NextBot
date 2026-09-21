@@ -19,7 +19,7 @@ const repo = require('../../db/repo');
 const settingsResolver = require('../../services/settings-resolver');
 const voiceTracker = require('../../services/voice-state-tracker');
 const voiceStateEvent = require('../../events/voiceStateUpdate');
-const { successEmbed, errorEmbed } = require('../../utils/helpers');
+const { successEmbed, errorEmbed, isOwnerOrAdmin } = require('../../utils/helpers');
 const logger = require('../../utils/logger');
 
 // Sistema "multi temp voice" stile VoiceMaster/TempVoice: ogni utente che entra
@@ -442,10 +442,12 @@ async function setLocked(interaction, channel, temp, locked) {
     await channel.permissionOverwrites.edit(interaction.guild.id, { Connect: null }, { reason: 'voice unlock' });
   }
   if (locked && channel.members.size > 0) {
-    // Caccia chi non è autorizzato (owner + bot restano).
+    // Caccia chi non è autorizzato (owner + bot + admin restano).
     const allow = new Set([temp.owner_id, interaction.client.user.id]);
     for (const [, member] of channel.members) {
       if (allow.has(member.id)) continue;
+      // Gli admin del guild restano anche a canale lockato (sono super-owner).
+      if (member.permissions?.has?.(PermissionsBitField.Flags.Administrator)) continue;
       try { await member.voice.setChannel(null, 'voice locked'); } catch (_) {}
     }
   }
@@ -816,8 +818,12 @@ function buildModalFromSpec(spec) {
 
 // --- Risoluzione ownership ------------------------------------------------
 
-// Risolve il canale vocale temporaneo di cui l'utente è owner. Usato sia da
-// /voice <sub> che dai bottoni. Risposta uniforme:
+// Risolve il canale vocale temporaneo su cui l'utente può agire. Usato sia da
+// /voice <sub> che dai bottoni. L'utente può agire se è owner del temp voice,
+// oppure se ha il flag `Administrator` nel guild (può fare tutto quello che
+// farebbe l'owner su QUALSIASI vocale temporanea della guild).
+//
+// Risposta uniforme:
 //   { ok: true, channel, temp }
 //   { ok: false, reply: Promise<void> } -- il caller esegue `return result.reply`
 async function resolveOwnedVoiceChannel(interaction) {
@@ -828,8 +834,8 @@ async function resolveOwnedVoiceChannel(interaction) {
   if (!temp || temp.kind !== 'voice') {
     return { ok: false, reply: error(interaction, 'Questo canale non è un temp voice.') };
   }
-  if (temp.owner_id !== interaction.user.id) {
-    return { ok: false, reply: error(interaction, 'Solo il proprietario può usare questo comando.') };
+  if (!isOwnerOrAdmin(interaction.member, temp)) {
+    return { ok: false, reply: error(interaction, 'Solo il proprietario o un amministratore può usare questo comando.') };
   }
   return { ok: true, channel: voiceChannel, temp };
 }

@@ -219,6 +219,9 @@ async function enforceBlockedAndLocked(channel, temp) {
   const allow = new Set([temp.owner_id, channel.guild.members.me.id]);
   for (const [, member] of members) {
     if (allow.has(member.id)) continue;
+    // Gli admin del guild hanno lo stesso status dell'owner: possono stare in
+    // QUALSIASI temp voice anche se locked, blocked o banned.
+    if (member.permissions?.has?.(PermissionsBitField.Flags.Administrator)) continue;
     const banned = hasBanned && temp.banned.includes(member.id);
     const blocked = Array.isArray(temp.blocked) && temp.blocked.includes(member.id);
     if (banned || blocked || temp.locked) {
