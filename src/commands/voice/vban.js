@@ -1,16 +1,18 @@
 'use strict';
 
-// Context menu "vkick" (voice kick): tasto destro su un membro → Apps → VKick.
-// Espelle il membro target dal canale vocale dove si trova, purché chi esegue
-// il context menu sia owner di un canale temporaneo che contiene il target.
+// Context menu "vban" (voice ban): tasto destro su un membro → Apps → VBan.
+// Bandisce il target dal canale vocale dove si trova, purché chi esegue il
+// context menu sia owner di un canale temporaneo che contiene il target.
 //
-// Differenza dal ban: vkick = solo espulsione. Il target può rientrare
-// immediatamente. Per bloccare l'accesso usare /voice ban oppure il context
-// menu "vban".
+// Effetti:
+//   - aggiunge il target alla lista banned del canale (persiste nello snapshot
+//     VoiceRoom anche dopo la cancellazione del canale)
+//   - imposta permissionOverwrites Connect:false sul target (difesa in
+//     profondità a livello Discord)
+//   - scollega il target dal canale se attualmente connesso
+//   - al prossimo rientro, voiceStateUpdate lo kicca automaticamente
 //
-// Permessi richiesti:
-//   - invoke è owner di un temp voice channel
-//   - target si trova nello stesso canale vocale dell'invoke
+// Per riammettere: /voice unban oppure il bottone Unban del pannello.
 
 const { ContextMenuCommandBuilder, ApplicationCommandType, MessageFlags } = require('discord.js');
 const { errorEmbed, successEmbed } = require('../../utils/helpers');
@@ -19,15 +21,11 @@ const voiceStateEvent = require('../../events/voiceStateUpdate');
 const logger = require('../../utils/logger');
 
 const data = new ContextMenuCommandBuilder()
-  .setName('vkick')
+  .setName('vban')
   .setType(ApplicationCommandType.User);
 
 // Risoluzione ownership duplicata (piccola, evita import circolari con
 // tempchannel.js che è il command "voice").
-// NB: `reply` è una *funzione* che risponde all'interaction, non una Promise.
-// Il vecchio `interaction.reply.bind(...)` ritornava una Promise parzialmente
-// applicata che non veniva mai chiamata, lasciando l'utente in attesa fino al
-// timeout di Discord. Ora restituiamo una callback che chiama `reply()`.
 async function resolveOwnedVoiceChannel(interaction) {
   const reply = (msg) => interaction.reply({ embeds: [errorEmbed('Errore', msg)], flags: MessageFlags.Ephemeral });
 
@@ -49,7 +47,7 @@ async function syncSnapshot(interaction, channel) {
     const temp = await repo.getTempChannel(channel.id);
     if (temp) await voiceStateEvent.liveSyncVoiceRoom(channel, temp);
   } catch (err) {
-    logger.warn({ err: err.message, channel: channel.id }, 'syncSnapshot fallito (vkick)');
+    logger.warn({ err: err.message, channel: channel.id }, 'syncSnapshot fallito (vban)');
   }
 }
 
@@ -61,28 +59,29 @@ async function execute(interaction) {
     return interaction.reply({ embeds: [errorEmbed('Utente non trovato', 'Impossibile trovare il membro selezionato.')], flags: MessageFlags.Ephemeral });
   }
 
-  // Verifica che invoke sia in un canale vocale e che sia owner di un temp.
   const ownerResult = await resolveOwnedVoiceChannel(interaction);
   if (!ownerResult.ok) return ownerResult.reply;
 
-  // Il target deve essere nello stesso canale dell'invoke (e quindi anche
-  // nello stesso temp voice, dato che invoke è owner di quel temp).
   if (!target.voice?.channel || target.voice.channel.id !== ownerResult.channel.id) {
     return interaction.reply({ embeds: [errorEmbed('Non in canale', 'Questo utente non è nel tuo canale vocale.')], flags: MessageFlags.Ephemeral });
   }
   if (target.id === ownerResult.temp.owner_id) {
-    return interaction.reply({ embeds: [errorEmbed('Non valido', 'Non puoi cacciare te stesso.')], flags: MessageFlags.Ephemeral });
+    return interaction.reply({ embeds: [errorEmbed('Non valido', 'Non puoi bandire te stesso.')], flags: MessageFlags.Ephemeral });
   }
 
-  // vkick = solo espulsione. Niente blocked list, niente permissionOverwrites:
-  // il target può rientrare liberamente. Per bloccare l'accesso usare vban.
+  await repo.banVoiceUser(ownerResult.channel.id, target.id);
   try {
-    await target.voice.setChannel(null, 'voice vkick');
+    await ownerResult.channel.permissionOverwrites.edit(target.id, { Connect: false }, { reason: 'voice ban' });
+  } catch (err) {
+    logger.warn({ err: err.message, channel: ownerResult.channel.id, user: target.id }, 'vban: permissionOverwrites fallito');
+  }
+  try {
+    await target.voice.setChannel(null, 'voice vban');
   } catch (err) {
     return interaction.reply({ embeds: [errorEmbed('Errore', err.message)], flags: MessageFlags.Ephemeral });
   }
   await syncSnapshot(interaction, ownerResult.channel);
-  return interaction.reply({ embeds: [successEmbed('Espulso', `<@${target.id}> è stato espulso. Può rientrare liberamente.`)], flags: MessageFlags.Ephemeral });
+  return interaction.reply({ embeds: [successEmbed('Bannato', `<@${target.id}> è stato bandito dal tuo canale. Usa \`/voice unban\` per riammetterlo.`)], flags: MessageFlags.Ephemeral });
 }
 
 module.exports = { data, execute };

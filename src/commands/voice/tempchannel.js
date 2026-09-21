@@ -57,6 +57,8 @@ const BTN = {
   UNLOCK: `${CMD}:btn:unlock`,
   LIMIT: `${CMD}:btn:limit`,
   KICK: `${CMD}:btn:kick`,
+  BAN: `${CMD}:btn:ban`,
+  UNBAN: `${CMD}:btn:unban`,
   TRANSFER: `${CMD}:btn:transfer`,
   CLAIM: `${CMD}:btn:claim`,
   REFRESH: `${CMD}:btn:refresh`,
@@ -66,6 +68,8 @@ const BTN = {
 // senza costringere l'utente a scrivere l'ID a mano.
 const SEL = {
   KICK: `${CMD}:sel:kick`,
+  BAN: `${CMD}:sel:ban`,
+  UNBAN: `${CMD}:sel:unban`,
   TRANSFER: `${CMD}:sel:transfer`,
 };
 const MODAL = {
@@ -85,8 +89,9 @@ const data = new SlashCommandBuilder()
   .addSubcommand((sc) => sc.setName('lock').setDescription('Blocca l\'accesso al tuo canale'))
   .addSubcommand((sc) => sc.setName('unlock').setDescription('Sblocca l\'accesso al tuo canale'))
   .addSubcommand((sc) => sc.setName('limit').setDescription('Cambia il limite utenti (0=illimitato)').addIntegerOption((o) => o.setName('numero').setDescription('0-99').setMinValue(0).setMaxValue(99).setRequired(true)))
-.addSubcommand((sc) => sc.setName('kick').setDescription('Cacca un utente dal tuo canale').addStringOption((o) => o.setName('utente').setDescription('Utente da cacciare (solo membri del tuo canale)').setRequired(true).setAutocomplete(true)))
-  .addSubcommand((sc) => sc.setName('permit').setDescription('Riammetti un utente precedentemente bloccato').addStringOption((o) => o.setName('utente').setDescription('Utente da sbloccare').setRequired(true).setAutocomplete(true)))
+  .addSubcommand((sc) => sc.setName('kick').setDescription('Espelle un utente dal tuo canale (può rientrare subito)').addStringOption((o) => o.setName('utente').setDescription('Utente da espellere (solo membri del tuo canale)').setRequired(true).setAutocomplete(true)))
+  .addSubcommand((sc) => sc.setName('ban').setDescription('Bandisce un utente dal tuo canale (impedisce di rientrare)').addStringOption((o) => o.setName('utente').setDescription('Utente da bandire (solo membri del tuo canale)').setRequired(true).setAutocomplete(true)))
+  .addSubcommand((sc) => sc.setName('unban').setDescription('Riammette un utente precedentemente bandito').addStringOption((o) => o.setName('utente').setDescription('Utente da riammettere (deve essere già bandito)').setRequired(true).setAutocomplete(true)))
   .addSubcommand((sc) => sc.setName('transfer').setDescription('Trasferisci la proprietà a un altro membro').addStringOption((o) => o.setName('utente').setDescription('Nuovo proprietario (deve essere nel canale)').setRequired(true).setAutocomplete(true)))
   .addSubcommand((sc) => sc.setName('claim').setDescription('Rivendica un canale temporaneo orfano (owner assente)'))
   .addSubcommand((sc) => sc.setName('info').setDescription('Mostra la configurazione del tuo canale'));
@@ -110,7 +115,7 @@ async function autocomplete(interaction) {
   if (focused.name !== 'utente') return interaction.respond([]);
 
   const sub = interaction.options.getSubcommand();
-  if (sub !== 'kick' && sub !== 'transfer' && sub !== 'permit') {
+  if (!['kick', 'transfer', 'ban', 'unban'].includes(sub)) {
     return interaction.respond([]);
   }
 
@@ -118,12 +123,38 @@ async function autocomplete(interaction) {
   if (!voiceChannel) return interaction.respond([]);
 
   const needle = focused.value.toLowerCase();
-  const ownerId = sub === 'permit' ? null : voiceTracker.getOwnerId(interaction.guildId, voiceChannel.id);
+  const ownerId = voiceTracker.getOwnerId(interaction.guildId, voiceChannel.id);
+
+  // Per /voice unban la fonte è la lista banned del canale (il membro non è
+  // più connesso, è proprio quello il punto), non i membri attuali.
+  if (sub === 'unban') {
+    const temp = await repo.getTempChannel(voiceChannel.id).catch(() => null);
+    const banned = Array.isArray(temp?.banned) ? temp.banned : [];
+    if (banned.length === 0) return interaction.respond([]);
+
+    const choices = [];
+    for (const userId of banned) {
+      let label = userId;
+      let detail = '';
+      try {
+        const m = await interaction.guild.members.fetch(userId);
+        label = m.user.globalName || m.user.username;
+        detail = m.user.tag;
+      } catch (_) {
+        // utente non più in guild: mostriamo l'ID come label
+        detail = 'non più nel server';
+      }
+      if (needle && !`${label} ${detail} ${userId}`.toLowerCase().includes(needle)) continue;
+      choices.push({ name: label.slice(0, 100), value: userId });
+      if (choices.length >= 25) break;
+    }
+    return interaction.respond(choices);
+  }
 
   const choices = [];
   for (const [, m] of voiceChannel.members) {
     if (m.id === interaction.client.user.id) continue; // escludi il bot
-    if (sub !== 'permit' && m.id === ownerId) continue; // non puoi kickare/trasferire a te stesso
+    if (m.id === ownerId) continue; // non puoi kickare/trasferire/bandire te stesso
 
     const label = m.user.globalName || m.user.username;
     if (needle && !`${label} ${m.user.tag}`.toLowerCase().includes(needle)) continue;
@@ -159,6 +190,10 @@ async function handleComponent(interaction) {
       return showLimitModal(interaction);
     case BTN.KICK:
       return showKickSelect(interaction);
+    case BTN.BAN:
+      return showBanSelect(interaction);
+    case BTN.UNBAN:
+      return showUnbanSelect(interaction);
     case BTN.TRANSFER:
       return showTransferSelect(interaction);
     case BTN.CLAIM:
@@ -184,14 +219,59 @@ async function handleSelectMenu(interaction) {
     if (!targetMember?.voice?.channel || targetMember.voice.channel.id !== result.channel.id) {
       return interaction.update({ embeds: [errorEmbed('Non in canale', 'Questo utente non è più nel tuo canale.')], components: [] });
     }
-    await repo.addBlockedUser(result.channel.id, targetId);
     try {
       await targetMember.voice.setChannel(null, 'voice kick');
     } catch (err) {
       return interaction.update({ embeds: [errorEmbed('Errore', err.message)], components: [] });
     }
     await syncSnapshot(interaction, result.channel);
-    return interaction.update({ embeds: [successEmbed('Cacciato', `<@${targetId}> è stato cacciato. Usa \`/voice permit\` per riammesso.`)], components: [] });
+    return interaction.update({ embeds: [successEmbed('Espulso', `<@${targetId}> è stato espulso. Può rientrare liberamente.`)], components: [] });
+  }
+
+  if (interaction.customId === SEL.BAN) {
+    await interaction.deferUpdate().catch(() => {});
+    const targetMember = await interaction.guild.members.fetch(targetId).catch(() => null);
+    if (!targetMember?.voice?.channel || targetMember.voice.channel.id !== result.channel.id) {
+      return interaction.editReply({ embeds: [errorEmbed('Non in canale', 'Questo utente non è più nel tuo canale.')], components: [] });
+    }
+    if (targetId === result.temp.owner_id) {
+      return interaction.editReply({ embeds: [errorEmbed('Non valido', 'Non puoi bandire te stesso.')], components: [] });
+    }
+    await repo.banVoiceUser(result.channel.id, targetId);
+    // Permission overwrite: Connect:false. Così anche se l'unban dimentica la
+    // lista banned, il canale resta precluso a livello Discord.
+    try {
+      await result.channel.permissionOverwrites.edit(targetId, { Connect: false }, { reason: 'voice ban' });
+    } catch (err) {
+      logger.warn({ err: err.message, channel: result.channel.id, user: targetId }, 'voice ban: permissionOverwrites fallito');
+    }
+    try {
+      await targetMember.voice.setChannel(null, 'voice ban');
+    } catch (err) {
+      return interaction.editReply({ embeds: [errorEmbed('Errore', err.message)], components: [] });
+    }
+    await syncSnapshot(interaction, result.channel);
+    return interaction.editReply({ embeds: [successEmbed('Bannato', `<@${targetId}> è stato bandito dal canale. Usa \`/voice unban\` per riammesso.`)], components: [] });
+  }
+
+  if (interaction.customId === SEL.UNBAN) {
+    await interaction.deferUpdate().catch(() => {});
+    const banned = Array.isArray(result.temp.banned) ? result.temp.banned : [];
+    if (!banned.includes(targetId)) {
+      return interaction.editReply({ embeds: [errorEmbed('Non bandito', 'Questo utente non è nella lista banditi.')], components: [] });
+    }
+    await repo.unbanVoiceUser(result.channel.id, targetId);
+    // Rimuovi l'overwrite se esiste (se l'utente non è in guild, la delete
+    // fallisce silente, va bene).
+    try {
+      await result.channel.permissionOverwrites.delete(targetId, 'voice unban');
+    } catch (_) {
+      try {
+        await result.channel.permissionOverwrites.edit(targetId, { Connect: null }, { reason: 'voice unban' });
+      } catch (_) {}
+    }
+    await syncSnapshot(interaction, result.channel);
+    return interaction.editReply({ embeds: [successEmbed('Riamesso', `<@${targetId}> può rientrare nel canale.`)], components: [] });
   }
 
   if (interaction.customId === SEL.TRANSFER) {
@@ -252,6 +332,8 @@ const SUBCOMMAND_HANDLERS = {
   unlock: cmdUnlock,
   limit: cmdLimit,
   kick: cmdKick,
+  ban: cmdBan,
+  unban: cmdUnban,
   permit: cmdPermit,
   transfer: cmdTransfer,
   claim: cmdClaim,
@@ -373,7 +455,16 @@ async function setLocked(interaction, channel, temp, locked) {
   return interaction.reply({ embeds: [successEmbed(locked ? 'Bloccato' : 'Sbloccato', `Il canale è ora **${locked ? 'bloccato' : 'aperto'}** ai nuovi ingressi.`)], flags: MessageFlags.Ephemeral });
 }
 
-// --- kick / permit --------------------------------------------------------
+// --- kick / ban / unban / permit -----------------------------------------
+//
+// Differenze semantiche:
+//   - kick: solo `voice.setChannel(null)`. Niente blocked list, niente
+//     permission overwrites. L'utente può rientrare immediatamente.
+//   - ban:  espelle + `permissionOverwrites.edit(user, { Connect: false })` +
+//     aggiunge alla lista banned (persiste nello snapshot VoiceRoom). Anche
+//     se l'owner lascia e il canale si ricrea, il ban sopravvive.
+//   - unban: rimuove da banned + `permissionOverwrites.delete(user)`.
+//   - permit: retrocompat — rimuove da blocked (lista usata dal vecchio kick).
 
 async function cmdKick(interaction) {
   const result = await resolveOwnedVoiceChannel(interaction);
@@ -386,16 +477,67 @@ async function cmdKick(interaction) {
     return error(interaction, 'Questo utente non è nel tuo canale.');
   }
   if (targetId === result.temp.owner_id) {
-    return error(interaction, 'Non puoi cacciare te stesso.');
+    return error(interaction, 'Non puoi espellere te stesso.');
   }
-  await repo.addBlockedUser(result.channel.id, targetId);
   try {
     await member.voice.setChannel(null, 'voice kick');
   } catch (err) {
     return error(interaction, err.message);
   }
   await syncSnapshot(interaction, result.channel);
-  return interaction.reply({ embeds: [successEmbed('Cacciato', `<@${targetId}> è stato cacciato. Usa \`/voice permit\` per riammesso.`)], flags: MessageFlags.Ephemeral });
+  return interaction.reply({ embeds: [successEmbed('Espulso', `<@${targetId}> è stato espulso. Può rientrare liberamente.`)], flags: MessageFlags.Ephemeral });
+}
+
+async function cmdBan(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+
+  const targetId = interaction.options.getString('utente');
+  if (!/^\d{17,20}$/.test(targetId)) return error(interaction, 'Utente non valido.');
+  const member = await interaction.guild.members.fetch(targetId).catch(() => null);
+  if (!member?.voice?.channel || member.voice.channel.id !== result.channel.id) {
+    return error(interaction, 'Questo utente non è nel tuo canale.');
+  }
+  if (targetId === result.temp.owner_id) {
+    return error(interaction, 'Non puoi bandire te stesso.');
+  }
+  await repo.banVoiceUser(result.channel.id, targetId);
+  // Permission overwrite: Connect:false. Difesa in profondità: anche se unban
+  // dimentica la lista, Discord blocca l'ingresso.
+  try {
+    await result.channel.permissionOverwrites.edit(targetId, { Connect: false }, { reason: 'voice ban' });
+  } catch (err) {
+    logger.warn({ err: err.message, channel: result.channel.id, user: targetId }, 'voice ban: permissionOverwrites fallito');
+  }
+  try {
+    await member.voice.setChannel(null, 'voice ban');
+  } catch (err) {
+    return error(interaction, err.message);
+  }
+  await syncSnapshot(interaction, result.channel);
+  return interaction.reply({ embeds: [successEmbed('Bannato', `<@${targetId}> è stato bandito dal canale. Usa \`/voice unban\` per riammetterlo.`)], flags: MessageFlags.Ephemeral });
+}
+
+async function cmdUnban(interaction) {
+  const result = await resolveOwnedVoiceChannel(interaction);
+  if (!result.ok) return result.reply;
+
+  const targetId = interaction.options.getString('utente');
+  if (!/^\d{17,20}$/.test(targetId)) return error(interaction, 'Utente non valido.');
+  const banned = Array.isArray(result.temp.banned) ? result.temp.banned : [];
+  if (!banned.includes(targetId)) {
+    return error(interaction, 'Questo utente non è bandito dal tuo canale.');
+  }
+  await repo.unbanVoiceUser(result.channel.id, targetId);
+  try {
+    await result.channel.permissionOverwrites.delete(targetId, 'voice unban');
+  } catch (_) {
+    try {
+      await result.channel.permissionOverwrites.edit(targetId, { Connect: null }, { reason: 'voice unban' });
+    } catch (_) {}
+  }
+  await syncSnapshot(interaction, result.channel);
+  return interaction.reply({ embeds: [successEmbed('Riamesso', `<@${targetId}> può rientrare nel canale.`)], flags: MessageFlags.Ephemeral });
 }
 
 async function cmdPermit(interaction) {
@@ -487,13 +629,15 @@ function buildPanel(channel, temp) {
   const ownerMention = `<@${temp.owner_id}>`;
   const limit = channel.userLimit === 0 ? '∞' : String(channel.userLimit);
   const blocked = Array.isArray(temp.blocked) ? temp.blocked.length : 0;
+  const banned = Array.isArray(temp.banned) ? temp.banned.length : 0;
   const desc = [
     `**Canale:** ${channel}`,
     `**Proprietario:** ${ownerMention}`,
     `**Stato:** ${temp.locked ? '🔒 bloccato' : '🔓 aperto'}`,
     `**Limite utenti:** ${limit}`,
     `**Membri attuali:** ${channel.members.size}`,
-    `**Bloccati:** ${blocked}`,
+    `**Bloccati (kick legacy):** ${blocked}`,
+    `**Banditi:** ${banned}`,
   ].join('\n');
   return new EmbedBuilder()
     .setColor(0x5865f2)
@@ -512,11 +656,15 @@ function buildControlRows() {
   );
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(BTN.KICK).setLabel('Kick').setStyle(ButtonStyle.Danger).setEmoji('👢'),
+    new ButtonBuilder().setCustomId(BTN.BAN).setLabel('Ban').setStyle(ButtonStyle.Danger).setEmoji('🔨'),
+    new ButtonBuilder().setCustomId(BTN.UNBAN).setLabel('Unban').setStyle(ButtonStyle.Success).setEmoji('🔓'),
     new ButtonBuilder().setCustomId(BTN.TRANSFER).setLabel('Proprietario').setStyle(ButtonStyle.Success).setEmoji('👑'),
+  );
+  const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(BTN.CLAIM).setLabel('Claim').setStyle(ButtonStyle.Success).setEmoji('🙋'),
     new ButtonBuilder().setCustomId(BTN.REFRESH).setLabel('Aggiorna').setStyle(ButtonStyle.Secondary).setEmoji('🔄'),
   );
-  return [row1, row2];
+  return [row1, row2, row3];
 }
 
 function buildRenameModal() {
@@ -579,11 +727,59 @@ function showKickSelect(interaction) {
   const row = buildMemberSelectRow(
     interaction,
     SEL.KICK,
-    'Scegli chi cacciare',
+    'Scegli chi espellere',
     interaction.user.id,
   );
-  if (!row) return interaction.reply({ embeds: [errorEmbed('Nessun membro', 'Non c\'è nessuno da cacciare nel tuo canale.')], flags: MessageFlags.Ephemeral });
+  if (!row) return interaction.reply({ embeds: [errorEmbed('Nessun membro', 'Non c\'è nessuno da espellere nel tuo canale.')], flags: MessageFlags.Ephemeral });
   return interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
+}
+
+async function showBanSelect(interaction) {
+  const voiceChannel = interaction.member?.voice?.channel;
+  if (!voiceChannel) return interaction.reply({ embeds: [errorEmbed('Nessun canale', 'Entra prima in un canale vocale.')], flags: MessageFlags.Ephemeral });
+  const row = buildMemberSelectRow(
+    interaction,
+    SEL.BAN,
+    'Scegli chi bandire',
+    interaction.user.id,
+  );
+  if (!row) return interaction.reply({ embeds: [errorEmbed('Nessun membro', 'Non c\'è nessuno da bandire nel tuo canale.')], flags: MessageFlags.Ephemeral });
+  return interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
+}
+
+async function showUnbanSelect(interaction) {
+  const voiceChannel = interaction.member?.voice?.channel;
+  if (!voiceChannel) return interaction.reply({ embeds: [errorEmbed('Nessun canale', 'Entra prima in un canale vocale.')], flags: MessageFlags.Ephemeral });
+  const temp = await repo.getTempChannel(voiceChannel.id).catch(() => null);
+  const banned = Array.isArray(temp?.banned) ? temp.banned : [];
+  if (banned.length === 0) {
+    return interaction.reply({ embeds: [errorEmbed('Nessun bandito', 'Non c\'è nessun utente bandito nel tuo canale.')], flags: MessageFlags.Ephemeral });
+  }
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(SEL.UNBAN)
+    .setPlaceholder('Scegli chi riammettere')
+    .setMinValues(1)
+    .setMaxValues(1);
+  let count = 0;
+  for (const userId of banned) {
+    let label = userId;
+    let description;
+    try {
+      const m = await interaction.guild.members.fetch(userId);
+      label = m.user.globalName || m.user.username;
+      description = m.user.tag;
+    } catch (_) {
+      description = 'non più nel server';
+    }
+    menu.addOptions({
+      label: label.slice(0, 100),
+      description: (description || '').slice(0, 100) || undefined,
+      value: userId,
+    });
+    count += 1;
+    if (count >= 25) break;
+  }
+  return interaction.reply({ components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral });
 }
 
 function showTransferSelect(interaction) {

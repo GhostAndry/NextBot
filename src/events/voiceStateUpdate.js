@@ -201,8 +201,10 @@ async function enforceVerifiedVisibilityForGuild(guild, verifiedRoleId) {
 }
 
 async function enforceBlockedAndLocked(channel, temp) {
-  // Rispetta la modalità lock + il blocco per singolo utente.
-  if (!temp.locked && !(temp.blocked && temp.blocked.length)) return;
+  // Rispetta la modalità lock + il blocco per singolo utente (blocked list) +
+  // il ban (banned list).
+  const hasBanned = Array.isArray(temp.banned) && temp.banned.length > 0;
+  if (!temp.locked && !(temp.blocked && temp.blocked.length) && !hasBanned) return;
 
   // Discord popola `channel.members` in modo asincrono. Se veniamo chiamati
   // appena dopo un voiceStateUpdate di join, può essere ancora vuoto in cache.
@@ -217,9 +219,12 @@ async function enforceBlockedAndLocked(channel, temp) {
   const allow = new Set([temp.owner_id, channel.guild.members.me.id]);
   for (const [, member] of members) {
     if (allow.has(member.id)) continue;
+    const banned = hasBanned && temp.banned.includes(member.id);
     const blocked = Array.isArray(temp.blocked) && temp.blocked.includes(member.id);
-    if (blocked || temp.locked) {
-      try { await member.voice.setChannel(null, blocked ? 'voice blocked' : 'voice locked'); } catch (_) {}
+    if (banned || blocked || temp.locked) {
+      try {
+        await member.voice.setChannel(null, banned ? 'voice banned' : blocked ? 'voice blocked' : 'voice locked');
+      } catch (_) {}
     }
   }
 }
@@ -299,12 +304,13 @@ async function createTempVoice(guild, parent, member, hubChannelId) {
       reason: 'Canale vocale temporaneo',
     });
 
-    // Apri il canale live. Salviamo blocked + locked dallo snapshot se presenti,
-    // altrimenti la riga parte "pulita".
+    // Apri il canale live. Salviamo blocked + banned + locked dallo snapshot
+    // se presenti, altrimenti la riga parte "pulita".
     await repo.openTempChannel(channel.id, guild.id, member.id, 'voice', hubChannelId);
     if (snapshot) {
       const blocked = Array.isArray(snapshot.blocked) ? snapshot.blocked : [];
-      await prisma_tempChannel_updateBlocked(channel.id, blocked, locked ? 1 : 0);
+      const banned = Array.isArray(snapshot.banned) ? snapshot.banned : [];
+      await prisma_tempChannel_updateBlocked(channel.id, blocked, banned, locked ? 1 : 0);
     }
 
     voiceTracker.set(guild.id, channel.id, member.id, hubChannelId);
@@ -316,6 +322,20 @@ async function createTempVoice(guild, parent, member, hubChannelId) {
       } catch (_) {}
     }
 
+    // Se lo snapshot aveva dei banditi, applichiamo Connect:false su ciascuno
+    // come permission overwrite. Difesa in profondità rispetto a
+    // enforceBlockedAndLocked: blocchiamo l'ingresso a livello Discord
+    // (anche se la lista banned fosse corrotta o vuota al momento del join).
+    const snapshotBanned = Array.isArray(snapshot?.banned) ? snapshot.banned : [];
+    for (const userId of snapshotBanned) {
+      try {
+        await channel.permissionOverwrites.edit(userId, { Connect: false }, { reason: 'voice ban ripristinato' });
+      } catch (err) {
+        // Possibile: l'utente non è più in guild. Non è un errore bloccante.
+        logger.warn({ err: err.message, channel: channel.id, user: userId }, 'voice ban ripristinato: permissionOverwrites fallito');
+      }
+    }
+
     await member.voice.setChannel(channel, 'canale temporaneo creato');
     logger.info({ channel: channel.id, owner: member.id, hub: hubChannelId, restored: Boolean(snapshot) }, 'canale vocale temporaneo creato');
   } catch (err) {
@@ -324,11 +344,11 @@ async function createTempVoice(guild, parent, member, hubChannelId) {
 }
 
 // Helper che aggiorna in place la riga TempChannel quando vogliamo impostare
-// blocked/locked dalla snapshot. Centralizzato per leggibilità.
-async function prisma_tempChannel_updateBlocked(channelId, blocked, locked) {
+// blocked/locked/banned dalla snapshot. Centralizzato per leggibilità.
+async function prisma_tempChannel_updateBlocked(channelId, blocked, banned, locked) {
   await repo.prisma.tempChannel.update({
     where: { channelId },
-    data: { blocked: JSON.stringify(blocked), locked },
+    data: { blocked: JSON.stringify(blocked), banned: JSON.stringify(banned), locked },
   }).catch((err) => logger.warn({ err: err.message, channelId }, 'ripristino snapshot parziale'));
 }
 
@@ -342,11 +362,11 @@ function parseSettingsBlob(blob) {
   }
 }
 
-// Sincronizza lo stato live del canale (locked, blocked, userLimit, name)
-// sullo snapshot VoiceRoom. Viene chiamato da /voice <lock|unlock|kick|permit|
-// limit|rename|transfer> in modo che se il canale viene eliminato all'improvviso
-// (es. server ruolo disconnesso, bot rimosso), al rientro abbiamo già le
-// impostazioni aggiornate.
+// Sincronizza lo stato live del canale (locked, blocked, banned, userLimit,
+// name) sullo snapshot VoiceRoom. Viene chiamato da /voice
+// <lock|unlock|kick|ban|unban|permit|limit|rename|transfer> in modo che se il
+// canale viene eliminato all'improvviso (es. server ruolo disconnesso, bot
+// rimosso), al rientro abbiamo già le impostazioni aggiornate.
 async function liveSyncVoiceRoom(channel, temp) {
   if (!channel || !temp || !temp.owner_id) return;
   const hubId = temp.hub_channel_id;
@@ -355,6 +375,7 @@ async function liveSyncVoiceRoom(channel, temp) {
     await repo.saveVoiceRoom(temp.guild_id || channel.guild.id, temp.owner_id, hubId, {
       locked: temp.locked ? 1 : 0,
       blocked: Array.isArray(temp.blocked) ? temp.blocked : [],
+      banned: Array.isArray(temp.banned) ? temp.banned : [],
       settings: JSON.stringify({
         userLimit: channel.userLimit ?? 0,
         name: channel.name,
@@ -429,6 +450,7 @@ async function scheduleEmptyDelete(state) {
           await repo.saveVoiceRoom(state.guild.id, temp.owner_id, hubId, {
             locked: temp.locked || 0,
             blocked: Array.isArray(temp.blocked) ? temp.blocked : [],
+            banned: Array.isArray(temp.banned) ? temp.banned : [],
             settings: JSON.stringify({
               userLimit: fresh.userLimit ?? 0,
               name: fresh.name,

@@ -113,6 +113,8 @@ model TempChannel {
   locked        Int     @default(0)
   // JSON array di userId che hanno fatto kick / sono stati bloccati dal join
   blocked       String  @default("[]")
+  // JSON array di userId banditi dal canale (permissionOverwrites Connect:false + auto-kick al join)
+  banned        String  @default("[]")
   createdAt     Int?
 
   @@index([guildId, ownerId])
@@ -205,6 +207,8 @@ model VoiceRoom {
   locked      Int     @default(0)
   // JSON array di userId bloccati (persiste anche dopo la cancellazione del canale)
   blocked     String  @default("[]")
+  // JSON array di userId banditi dal canale (persiste anche dopo la cancellazione del canale)
+  banned      String  @default("[]")
   // JSON extra: nameTemplate, userLimitOverride, ecc.
   settings    String  @default("{}")
   lastActiveAt Int?

@@ -371,6 +371,7 @@ async function saveVoiceRoom(guildId, ownerId, hubChannelId, fields) {
   // passiamo come Array/Object.
   const normalized = { ...fields };
   if (Array.isArray(normalized.blocked)) normalized.blocked = JSON.stringify(normalized.blocked);
+  if (Array.isArray(normalized.banned)) normalized.banned = JSON.stringify(normalized.banned);
   if (normalized.settings && typeof normalized.settings !== 'string') {
     normalized.settings = JSON.stringify(normalized.settings);
   }
@@ -431,11 +432,22 @@ function parseBlockedList(blob) {
   }
 }
 
+function parseBannedList(blob) {
+  if (!blob) return [];
+  try {
+    const parsed = JSON.parse(blob);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
 function withBlockedList(row) {
   if (!row) return row;
   const blocked = parseBlockedList(row.blocked);
+  const banned = parseBannedList(row.banned);
   const settings = parseSettingsField(row.settings);
-  return { ...row, blocked, settings };
+  return { ...row, blocked, banned, settings };
 }
 
 function parseSettingsField(blob) {
@@ -500,6 +512,45 @@ async function clearBlockedUsers(channelId) {
   await prisma.tempChannel.update({
     where: { channelId },
     data: { blocked: '[]' },
+  });
+  return [];
+}
+
+// --- Ban / Unban utenti dal canale vocale --------------------------------
+//
+// Il "ban" del canale vocale è diverso dal kick: il ban applica un
+// permission overwrite `Connect: false` sul canale per quell'utente, lo espelle
+// se è dentro, e persiste in DB (TempChannel + snapshot VoiceRoom) anche dopo
+// la cancellazione del canale. L'unban rimuove sia l'overwrite sia l'entry
+// dalla lista banned.
+
+async function banVoiceUser(channelId, userId) {
+  const row = await prisma.tempChannel.findUnique({ where: { channelId } });
+  if (!row) return [];
+  const list = parseBannedList(row.banned);
+  if (!list.includes(userId)) list.push(userId);
+  await prisma.tempChannel.update({
+    where: { channelId },
+    data: { banned: JSON.stringify(list) },
+  });
+  return list;
+}
+
+async function unbanVoiceUser(channelId, userId) {
+  const row = await prisma.tempChannel.findUnique({ where: { channelId } });
+  if (!row) return [];
+  const list = parseBannedList(row.banned).filter((id) => id !== userId);
+  await prisma.tempChannel.update({
+    where: { channelId },
+    data: { banned: JSON.stringify(list) },
+  });
+  return list;
+}
+
+async function clearBannedUsers(channelId) {
+  await prisma.tempChannel.update({
+    where: { channelId },
+    data: { banned: '[]' },
   });
   return [];
 }
@@ -819,6 +870,7 @@ module.exports = {
   openTempChannel, removeTempChannel, getTempChannel,
   getTempChannelsByOwner, listAllTempChannelsForGuild, transferTempOwnership,
   setTempLocked, addBlockedUser, removeBlockedUser, clearBlockedUsers,
+  banVoiceUser, unbanVoiceUser, clearBannedUsers,
   saveVoiceRoom, getVoiceRoom, listVoiceRoomsByHub, deleteVoiceRoom,
   addVoiceHub, removeVoiceHub, removeVoiceHubById, getVoiceHubByChannel,
   getVoiceHubById, listVoiceHubs, setDefaultVoiceHub, renameVoiceHub, getHubChannelIds,
